@@ -1,0 +1,88 @@
+[package]
+name        = "raster-nv"
+version     = "0.0.1"
+description = "A scanline rasteriser with analytic anti-aliasing: paths in, an 8-bit COVERAGE mask out, and compositing as a separate step — so one rasterisation serves every colour, a clip is the same value intersected, and a glyph cache holds masks rather than pixels.  Strokes, dashes and text are path-to-path or mask-producing operations over geometry-nv, svg-nv, color-nv, image-nv and font-nv; the caller owns the image and the cache.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A rasteriser is arithmetic over numbers the caller already
+# holds: an edge list, a sort, a coverage accumulation, a blend.
+# Nothing is opened, nothing is written, no clock is read, and every
+# output buffer belongs to the caller — `fill_into` takes an `Image`
+# and answers one, and the glyph cache is a value the caller carries.
+#
+# There is no `FontSource`-shaped seam here and none is needed: this
+# package is handed outlines, and reading them is font-nv's business.
+layer       = "core"
+
+category    = "graphics"
+
+tags        = ["raster", "rasteriser", "anti-aliasing", "scanline", "path", "stroke", "gradient", "glyph", "sans-io"]
+repository  = "https://github.com/novolang/raster-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Coverage is the value, and the colour comes later"
+
+[dependencies]
+# geometry-nv, for the transform, the rectangle and the FILL RULE.
+#
+# `GeomFillRule` is the load-bearing reuse rather than the convenient
+# one: even-odd and non-zero are the same two rules SVG names, svg-nv
+# already passes the value straight through, and a `RstFillRule`
+# declared here would mean a caller converting between two enums that
+# have the same two variants — with `E2004` waiting for the program
+# that ends up with both.
+geometry-nv = "^0.0.1"
+
+# svg-nv, for `SvgPath` and `SvgPathCmd`: the one typed path on the
+# grid, and what font-nv's outlines already are.
+#
+# The same finding font-nv's manifest records applies here and is
+# argued in the README: the path type describes geometry, not SVG, and
+# belongs in geometry-nv.  Until it moves, a rasteriser that took a
+# path type of its own would force every caller to convert a value that
+# is already the right shape.
+svg-nv = "^0.0.1"
+
+# color-nv, for `Srgb8`, `Srgba8`, `ColorStop` and `ColorSpace`.
+#
+# The gradient stop list IS `[ColorStop]` and the interpolation space
+# IS `ColorSpace`, which is what makes an Oklab gradient one argument
+# rather than a second gradient type.  `colormix.over` is the
+# source-over blend this package's default mode is defined as.
+color-nv = "^0.0.1"
+
+# image-nv, for `Image` and `PixelKind`: the buffer the caller owns
+# and this package draws into.
+#
+# Declaring a target type of its own would mean a caller converting
+# between two flat pixel buffers to move between png-nv and this, which
+# is the whole reason image-nv sits at the bottom of the imaging stack.
+image-nv = "^0.0.1"
+
+# font-nv, by PATH while both are being developed together.
+#
+# `docs/publishing.md` § Dependencies between published packages
+# refuses a path dependency at publish, `--dry-run` included, and it is
+# right to: the tarball would carry `../font-nv` and send every
+# consumer to a directory that is not on their machine.  The line
+# becomes `font-nv = "^0.0.1"` once font-nv is on the registry, and
+# font-nv is published first because a package cannot be published
+# ahead of what it depends on.
+#
+# What it is for is `rasterglyph` and nothing else: `SvgPath` in font
+# units, `GeomXform` from `fontmetric.scale_for_px`, and
+# `FontShaped` for a whole run.  Every other module is reachable
+# without it.
+font-nv = "^0.0.1"

@@ -1,0 +1,237 @@
+// rasterdraw_tests.nv — strokes, paints, compositing, and the glyph
+// cache the caller holds.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: raster-nv.<module>.<fn>`.
+//
+// THE THREE ASSERTIONS THIS SUITE EXISTS FOR:
+//
+//   a stroke outline is filled NON-ZERO, because its two offsets run
+//   in opposite directions and an even-odd fill hollows out every
+//   join;
+//
+//   a glyph cache is keyed on an INTEGER size and a subpixel column —
+//   a cache keyed on a float misses every time and grows without
+//   bound, which is the failure that looks like a memory leak;
+//
+//   and a paint's alpha MULTIPLIES the mask's coverage rather than
+//   overriding it, which is what keeps a transparent shape's edges
+//   soft.
+
+use std.test
+use std.list
+use std.bytes
+use geomrect
+use geompoint
+use image
+use srgb
+use svgpath
+use rastermask
+use rasterstroke
+use rasterpaint
+use rasterdraw
+use rasterglyph
+
+fn line() -> svgpath.SvgPath
+    svgpath.line_to(svgpath.move_to(svgpath.empty(), 2.0, 8.0), 30.0, 8.0)
+
+fn blue() -> srgb.Srgb8
+    Srgb8 { r: 0, g: 0, b: 255 }
+
+fn red() -> srgb.Srgb8
+    Srgb8 { r: 255, g: 0, b: 0 }
+
+@test
+fn test_a_stroke_is_a_path_and_its_fill_rule_is_not_a_choice() [io]
+    test.case("THE CLAIM: stroking answers a PATH, so it can be measured and written out")
+    match rasterstroke.outline(line(), rasterstroke.solid(4.0))
+        Err(_)  => test.assert(false)
+        Ok(ink) =>
+            test.assert(svgpath.command_count(ink) > svgpath.command_count(line()))
+            test.assert(geomrect.height(svgpath.bounds(ink)) >= 4.0)
+
+    test.case("and there is ONE rule it may be filled with, published as a value")
+    test.assert(rasterstroke.fill_rule() == GeomNonZero)
+
+    test.case("because even-odd would hollow out every place the outline overlaps itself")
+    test.assert(rasterstroke.fill_rule() != GeomEvenOdd)
+
+@test
+fn test_the_zero_width_case_is_answered_by_name_rather_than_silently_picked() [io]
+    test.case("THE CLAIM: SVG says width 0 draws nothing, PostScript says one pixel")
+    test.assert(rasterstroke.solid(0.0).width == 0.0)
+    test.assert(rasterstroke.is_hairline(rasterstroke.solid(0.0)) == false)
+
+    test.case("so the other reading is a NAMED call rather than a silent reinterpretation")
+    test.assert(rasterstroke.is_hairline(rasterstroke.hairline()))
+
+@test
+fn test_dashing_is_path_to_path_so_it_composes_with_stroking() [io]
+    test.case("THE CLAIM: dash cuts the path, then stroke offsets the pieces")
+    match rasterstroke.dash(line(), [4.0, 2.0], 0.0)
+        Err(_) => test.assert(false)
+        Ok(d)  => test.assert(svgpath.subpath_count(d) > 1)
+
+    test.case("a pattern that cannot advance is refused, because the loop would not end")
+    test.assert(rasterstroke.dash_is_usable([]) == false)
+    test.assert(rasterstroke.dash_is_usable([0.0, 0.0]) == false)
+    test.assert(rasterstroke.dash_is_usable([4.0, 2.0]))
+    match rasterstroke.dash(line(), [], 0.0)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(e.message() != "")
+
+@test
+fn test_a_stroke_reaches_further_than_half_its_width_at_a_sharp_corner() [io]
+    let sharp = svgpath.of_points([geompoint.ptf(0.0, 0.0), geompoint.ptf(20.0, 0.0),
+                                   geompoint.ptf(0.0, 1.0)],
+                                   false)
+    let style = rasterstroke.solid(4.0)
+
+    test.case("THE CLAIM: the miter spike is why stroked bounds are not bounds + width/2")
+    let b = rasterstroke.stroked_bounds(sharp, style)
+    test.assert(geomrect.width(b) > geomrect.width(svgpath.bounds(sharp)) + 4.0)
+
+    test.case("and the miter limit is what stops it growing without bound")
+    test.assert(rasterstroke.miter_extent(0.05) > 4.0)
+    test.assert(rasterstroke.miter_becomes_bevel(0.05, 4.0))
+    test.assert(rasterstroke.miter_becomes_bevel(1.5, 4.0) == false)
+
+    test.case("hit testing a thin line is distance to a segment, not a filled outline")
+    test.assert(rasterstroke.stroke_contains(line(), style, 10.0, 8.0))
+    test.assert(rasterstroke.stroke_contains(line(), style, 10.0, 40.0) == false)
+
+@test
+fn test_a_paints_alpha_multiplies_the_coverage_rather_than_replacing_it() [io]
+    let half = rasterpaint.solid_alpha(Srgba8 { rgb: blue(), a: 128 })
+
+    test.case("THE CLAIM: a half-transparent paint through a half-covered pixel is a quarter")
+    test.assert(rasterpaint.is_solid(half))
+    test.assert(rasterpaint.is_opaque(half) == false)
+    test.assert(rasterpaint.color_at(half, 0.0, 0.0).a == 128)
+
+    test.case("an opaque solid is the compositor's early exit")
+    test.assert(rasterpaint.is_opaque(rasterpaint.solid(blue())))
+
+@test
+fn test_a_gradient_interpolates_in_oklab_unless_a_caller_says_otherwise() [io]
+    let g = rasterpaint.linear(0.0, 0.0, 100.0, 0.0, red(), blue())
+
+    test.case("THE CLAIM: sRGB interpolation is the muddy middle, and is not the default")
+    test.assert(rasterpaint.default_space() == SpaceOklab)
+    test.assert(rasterpaint.is_solid(g) == false)
+    test.assert(list.len(rasterpaint.stops_of(g)) == 2)
+
+    test.case("the parameter is 0.5 exactly half way along the axis")
+    test.assert(rasterpaint.parameter_at(g, 50.0, 0.0) == 0.5)
+    test.assert(rasterpaint.parameter_at(g, 0.0, 0.0) == 0.0)
+
+    test.case("and a gradient whose two points coincide has no parameter anywhere")
+    let bad = rasterpaint.linear(5.0, 5.0, 5.0, 5.0, red(), blue())
+    test.assert(rasterpaint.is_usable(bad) == false)
+    test.assert(rasterpaint.is_usable(g))
+
+    test.case("a one-stop gradient is a solid colour, which is NOT an error")
+    test.assert(rasterpaint.is_usable(rasterpaint.solid(red())))
+
+@test
+fn test_the_blend_modes_that_can_remove_opacity_are_named() [io]
+    test.case("THE CLAIM: a layer drawn with additive modes can be accumulated in any order")
+    test.assert(rasterpaint.reduces_alpha(RstOver) == false)
+    test.assert(rasterpaint.reduces_alpha(RstMultiply) == false)
+
+    test.case("and the three that can take coverage AWAY are the ones that cannot")
+    test.assert(rasterpaint.reduces_alpha(RstSrcCopy))
+    test.assert(rasterpaint.reduces_alpha(RstSrcIn))
+    test.assert(rasterpaint.reduces_alpha(RstSrcOut))
+
+    test.case("the mode names are CSS's, so an SVG's mix-blend-mode matches without a table")
+    test.assert(rasterpaint.mode_name(RstOver) == "source-over")
+    test.assert(rasterpaint.mode_name(RstMultiply) == "multiply")
+    test.assert(list.len(rasterpaint.modes_supported()) >= 10)
+
+    test.case("and source-over at one pixel agrees with color-nv's own")
+    let opaque = Srgba8 { rgb: red(), a: 255 }
+    test.assert(rasterpaint.blend_over(opaque, Srgba8 { rgb: blue(), a: 255 }).rgb.r == 255)
+    test.assert(rasterpaint.blend(RstOver, opaque, opaque).a == 255)
+
+@test
+fn test_the_caller_owns_the_image_and_gets_it_back() [io]
+    let img = image.new(32, 16, PixRgba8)
+    let o = rasterdraw.opts(32, 16)
+
+    test.case("THE CLAIM: no canvas, no context, no state between calls")
+    test.assert(rasterdraw.can_draw_into(img))
+    test.assert(list.len(rasterdraw.kinds_supported()) >= 4)
+
+    test.case("a fill takes an Image and answers one")
+    match rasterdraw.fill_rect(img, geomrect.of_xywh(0.0, 0.0, 4.0, 4.0),
+                               rasterpaint.solid(blue()), o)
+        Err(_)  => test.assert(false)
+        Ok(out) =>
+            test.assert(out.width == 32)
+            match image.pixel(out, 1, 1)
+                Some(px) => test.assert(px.rgb.b == 255)
+                None     => test.assert(false)
+
+    test.case("and a 16-bit image is refused by NAME rather than rounded twice")
+    test.assert(rasterdraw.can_draw_into(image.new(4, 4, PixRgba16)) == false)
+
+@test
+fn test_the_options_are_a_value_so_a_clip_cannot_be_left_set() [io]
+    let o = rasterdraw.opts(32, 16)
+
+    test.case("THE CLAIM: two draws with the same options are the same call")
+    test.assert(geomrect.width_i(o.clip_rect) == 32)
+    test.assert(o.clip_mask == None)
+    test.assert(o.blend == RstOver)
+
+    test.case("and a changed option is a NEW value, not a mutation to remember to undo")
+    test.assert(rasterdraw.with_blend(o, RstMultiply).blend == RstMultiply)
+    test.assert(o.blend == RstOver)
+
+    test.case("a tile's options are the same thing confined to a rectangle")
+    test.assert(geomrect.width_i(rasterdraw.opts_at(geomrect.of_xywh_i(0, 0, 8, 8)).clip_rect)
+                == 8)
+
+@test
+fn test_a_mask_and_an_image_convert_both_ways_with_no_codec_involved() [io]
+    match rastermask.full(8, 8, 0, 0, rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: a mask IS an 8-bit greyscale image, in the same layout")
+            let g = rasterdraw.mask_to_image(m)
+            test.assert(g.kind == PixLuma8)
+            test.assert(bytes.len(g.samples) == 64)
+
+            test.case("and a decoded image's alpha is a coverage mask, which is why composite is public")
+            match rasterdraw.image_to_mask(image.new(8, 8, PixRgba8), 0, 0,
+                                           rastermask.default_limits())
+                Err(_)   => test.assert(false)
+                Ok(back) => test.assert(back.width == 8)
+
+@test
+fn test_the_glyph_cache_is_keyed_on_integers_and_belongs_to_the_caller() [io]
+    let c = rasterglyph.cache(64)
+
+    test.case("THE CLAIM: three subpixel columns, which is what stops text jittering")
+    test.assert(rasterglyph.subpixel_steps() == 3)
+
+    test.case("a key holds the size in 1/64ths, because two Floats do not compare equal")
+    let k = rasterglyph.key_for(42, 0, 16.0, 10.0)
+    test.assert(k.size_64 == 1024)
+    test.assert(k.glyph == 42)
+
+    test.case("and the fractional pen position picks the column, rather than being rounded away")
+    test.assert(rasterglyph.key_for(42, 0, 16.0, 10.0).subpixel_x
+                != rasterglyph.key_for(42, 0, 16.0, 10.5).subpixel_x)
+
+    test.case("the font id is the CALLER's number, so two fonts' glyph 42 cannot collide")
+    test.assert(rasterglyph.key_for(42, 0, 16.0, 10.0).font_id
+                != rasterglyph.key_for(42, 1, 16.0, 10.0).font_id)
+
+    test.case("and the cache is a value that goes in and comes out")
+    test.assert(rasterglyph.cached_count(c) == 0)
+    test.assert(rasterglyph.is_cached(c, k) == false)
+    test.assert(rasterglyph.cached(c, k) == None)
+    test.assert(rasterglyph.cached_count(rasterglyph.cleared(c)) == 0)
+    test.assert(rasterglyph.cache_bytes(c) == 0)

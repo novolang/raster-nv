@@ -1,0 +1,200 @@
+// rasterstroke.nv — a stroke is a PATH, not a drawing operation.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE SHAPE OF THIS MODULE, AND WHY IT IS PATH-TO-PATH.  Stroking a
+// path means walking it, offsetting by half the width to the left and
+// to the right, joining the offsets at each corner and capping them at
+// each end.  The result is a closed outline — a path — and filling it
+// with the non-zero rule is what draws the stroke.
+//
+// So `outline` answers an `SvgPath` and nothing here rasterises.  Three
+// things follow, and each of them is why:
+//
+//   THE STROKE CAN BE INSPECTED.  A caller can measure its bounds,
+//   test a point against it, write it to an SVG file, or hand it back
+//   into another stroke.  A rasteriser that only ever drew strokes
+//   could do none of those, and every consumer that needed one would
+//   reimplement the offsetting.
+//
+//   DASHING COMPOSES.  A dash pattern cuts a path into pieces BEFORE
+//   it is stroked, so `dash` is also path-to-path and the two chain:
+//   `outline(dash(p, pattern)!, style)`.  A renderer that fused them
+//   would have one function with eight parameters and no way to dash
+//   without stroking.
+//
+//   AND THE FILL RULE IS NOT A CHOICE.  A stroke outline must be
+//   filled non-zero: its left and right offsets run in opposite
+//   directions and an even-odd fill would hollow out every overlap,
+//   which is visible wherever a path crosses itself.  `fill_rule`
+//   below says so as a value, so nobody has to remember.
+//
+// WHAT IS NOT HERE.  Stroke-to-fill for a path with cusps is one of
+// the genuinely hard problems in 2D graphics, and the honest scope is
+// in the README: this offsets and joins, it does not remove the
+// self-intersections a tight curve produces, and the non-zero fill is
+// what makes the result look right anyway.
+
+use geomrect
+use svgpath
+use rastererror
+
+// How a stroke turns a corner.
+pub enum RstJoin
+    // Extend both edges until they meet, falling back to a bevel when
+    // the spike would be longer than the miter limit.  What a
+    // rectangle's corners want, and what makes a sharp angle look
+    // sharp.
+    RstMiter
+    // Fill the wedge with an arc.  What a pen looks like.
+    RstRound
+    // Cut straight across.  The cheapest, and what a miter degrades
+    // into.
+    RstBevel
+
+// How a stroke ends.
+pub enum RstCap
+    // Stop at the endpoint.  A zero-length subpath then draws NOTHING,
+    // which is the case a caller drawing dots trips over.
+    RstButt
+    // A half-disc past the endpoint.  A zero-length subpath draws a
+    // dot, which is usually what was meant.
+    RstRoundCap
+    // A half-square past the endpoint, extending by half the width.
+    RstSquare
+
+// Everything a stroke needs except the path.
+//
+// A struct rather than five arguments because the same style is
+// applied to many paths and because a caller that passed the miter
+// limit where the width goes would get a picture rather than an error.
+pub struct RstStrokeStyle
+    // Line width in the PATH's own units.  The outline is offset by
+    // half of it on each side.
+    width: Float
+    // How corners are turned.
+    join: RstJoin
+    // How ends are finished.
+    cap: RstCap
+    // The ratio at which a miter becomes a bevel: miter length over
+    // line width.  4.0 is SVG's default, and the reason the parameter
+    // exists is that a very sharp angle miters into a spike whose
+    // length grows without bound.
+    miter_limit: Float
+    // The dash pattern: alternating on and off lengths, in path units.
+    // Empty means a solid line.
+    dash: [Float]
+    // How far into the pattern the first subpath starts.
+    dash_offset: Float
+
+// A solid stroke of a given width: round joins, butt caps, SVG's miter
+// limit.
+//
+// The defaults are SVG's except for the join, which is round here
+// because a plot's polyline is the first consumer and a miter on a
+// data series produces spikes wherever the data turns sharply.
+pub fn solid(width: Float) -> RstStrokeStyle []
+    todo("raster-nv.rasterstroke.solid")
+
+// A hairline: the thinnest stroke that draws at all.
+//
+// THE CASE WITH NO OBVIOUS ANSWER, ANSWERED BY NAME.  A width of 0 in
+// SVG means "draw nothing"; a width of 0 in PostScript and in most
+// plotting libraries means "one device pixel, whatever the transform".
+// Both readings are defensible and a library that silently picked one
+// is a library whose output changes when a caller switches to it.  So
+// `width: 0.0` DRAWS NOTHING here, matching SVG, and this is the call
+// that asks for the other reading — a stroke whose outline is built
+// after the transform, one pixel wide.
+pub fn hairline() -> RstStrokeStyle []
+    todo("raster-nv.rasterstroke.hairline")
+
+// Whether a style is the hairline case.
+pub fn is_hairline(s: RstStrokeStyle) -> Bool []
+    todo("raster-nv.rasterstroke.is_hairline")
+
+// The fill rule a stroke outline must be filled with: `GeomNonZero`.
+//
+// A function rather than a sentence, because a caller that filled a
+// stroke even-odd gets a picture that is right until two segments
+// overlap and then has holes in it — and the overlap is what a join
+// IS.
+pub fn fill_rule() -> GeomFillRule []
+    todo("raster-nv.rasterstroke.fill_rule")
+
+// ── Path to path ─────────────────────────────────────────────────────
+
+// The outline of a stroked path: a closed path to fill non-zero.
+//
+// In the SAME coordinates as the input, so the stroke width means what
+// the caller meant by it and the transform is applied afterwards by
+// `rasterfill.fill`. That ordering is a decision with a visible
+// consequence: a stroke offset before a non-uniform scale comes out
+// elliptical, which is what SVG's default `vector-effect` specifies
+// and what a caller drawing a scaled diagram expects.
+//
+// `RstBadDash` when the style's dash pattern cannot advance.
+//
+// ```novo ignore
+// let ink = rasterstroke.outline(path, rasterstroke.solid(2.0))!
+// let m   = rasterfill.fill(ink, xform, clip, rasterstroke.fill_rule(),
+//                           rasterfill.default_flatten(),
+//                           rastermask.default_limits())!
+// ```
+pub fn outline(path: svgpath.SvgPath,
+               style: RstStrokeStyle) -> Result<svgpath.SvgPath, rastererror.RstFault> []
+    todo("raster-nv.rasterstroke.outline")
+
+// A path cut into the on-segments of a dash pattern.
+//
+// Path-to-path and separate from `outline`, so a caller can dash
+// without stroking — which is what an animated dash offset and a
+// path-length measurement both need — and so the two compose in the
+// order the specification says: dash first, then stroke.
+//
+// `RstBadDash` when the pattern is empty or sums to zero, because the
+// loop that walks it would not terminate.
+pub fn dash(path: svgpath.SvgPath, pattern: [Float],
+            offset: Float) -> Result<svgpath.SvgPath, rastererror.RstFault> []
+    todo("raster-nv.rasterstroke.dash")
+
+// Whether a dash pattern can advance at all.
+//
+// The check `dash` makes, published so a caller validating a style
+// sheet can make it once rather than per path.
+pub fn dash_is_usable(pattern: [Float]) -> Bool []
+    todo("raster-nv.rasterstroke.dash_is_usable")
+
+// ── Measuring ────────────────────────────────────────────────────────
+
+// Where a stroked path reaches, without building the outline.
+//
+// The path's own bounds widened by half the width, plus the miter
+// allowance at the sharpest corner — which is why it is not simply the
+// bounds inflated by half the width, and why a caller that assumed it
+// was would clip the points off its own star.
+pub fn stroked_bounds(path: svgpath.SvgPath, style: RstStrokeStyle) -> geomrect.GeomRectF []
+    todo("raster-nv.rasterstroke.stroked_bounds")
+
+// How far past a corner the miter reaches, as a multiple of half the
+// width.
+//
+// Published because it is the number the miter limit is compared
+// against, and a caller tuning a limit for a particular drawing wants
+// to see what its sharpest corner actually asks for.
+pub fn miter_extent(angle_radians: Float) -> Float []
+    todo("raster-nv.rasterstroke.miter_extent")
+
+// Whether a corner at this angle would be bevelled under this limit.
+pub fn miter_becomes_bevel(angle_radians: Float, limit: Float) -> Bool []
+    todo("raster-nv.rasterstroke.miter_becomes_bevel")
+
+// Whether a point is inside the stroke.
+//
+// Hit testing a LINE, which is what an editor selecting a thin path
+// needs and what filling the outline and testing that would answer far
+// more slowly. Distance to the nearest segment against half the width,
+// with the caps and joins accounted for.
+pub fn stroke_contains(path: svgpath.SvgPath, style: RstStrokeStyle, at_x: Float,
+                       at_y: Float) -> Bool []
+    todo("raster-nv.rasterstroke.stroke_contains")

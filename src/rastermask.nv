@@ -1,0 +1,262 @@
+// rastermask.nv — the value this package is built around: coverage,
+// eight bits a pixel, with no colour in it.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THIS MODULE IS THE LOAD-BEARING INTERFACE OF THE PACKAGE.
+//
+// A rasteriser's real output is not pixels.  It is the answer to one
+// question per pixel — how much of this pixel does the shape cover? —
+// and that answer is a number between 0 and 255 that knows nothing
+// about what colour the shape is.  Every design decision in this
+// package follows from separating that number from the compositing
+// that consumes it:
+//
+//   A GLYPH CACHE HOLDS MASKS, NOT PIXELS.  A terminal draws the same
+//   `e` in sixteen colours; a renderer that cached pixels would
+//   rasterise it sixteen times, and one that caches coverage
+//   rasterises it once.  `rasterglyph` therefore caches `RstMask` and
+//   the colour arrives at the blend.
+//
+//   A CLIP IS THE SAME VALUE.  Clipping to a shape is `intersect` of
+//   two masks, so a clip is anti-aliased for free and a clip to a
+//   rotated rectangle is not a special case.  tiny-skia calls this a
+//   `ClipMask` and keeps it separate from its pixmap; the separation
+//   is the idea, and having one type for both halves is the
+//   simplification.
+//
+//   AND THE 1-BIT CASE IS A THRESHOLD.  An e-paper panel takes one bit
+//   a pixel, and `threshold` plus `pack_rows_1bit` is the whole
+//   conversion.  See the README's § Does e-paper earn a module for why
+//   it is two functions rather than a module.
+//
+// EIGHT BITS AND NOT SIXTEEN, AND NOT A FLOAT.  A byte is what a
+// composite against an 8-bit image can use without rounding twice, it
+// is what FreeType, tiny-skia and every font atlas in the world store,
+// and it makes a 1024-by-1024 mask one megabyte instead of four.  The
+// accumulation inside the scanline sweep is at higher precision; what
+// crosses the interface is a byte.
+//
+// THE MASK CARRIES ITS OWN RECTANGLE, which is the field that makes it
+// usable.  A path's coverage is zero almost everywhere, and a mask the
+// size of the image would be mostly zeroes — so a mask covers the
+// path's bounding box clipped to the target, and `origin_x`/`origin_y`
+// say where that box sits.  Two masks combine only when their
+// rectangles match, and `RstExtentMismatch` is what skipping the check
+// costs.
+
+use geomrect
+use rastererror
+
+// A coverage plane: `width * height` bytes, one per pixel, 0 to 255.
+//
+// Row-major with no padding, so the stride is exactly `width` and a
+// caller may treat the whole buffer as one run.  The same layout
+// image-nv uses for an 8-bit greyscale image, deliberately: a mask can
+// be handed to `image.from_samples` as a `PixLuma8` and written out as
+// a PNG, which is how a test looks at what the rasteriser did.
+pub struct RstMask
+    // Width in pixels.  At least 1.
+    width: Int
+    // Height in pixels.  At least 1.
+    height: Int
+    // Where the mask's top-left corner sits in the target image.  May
+    // be negative: a shape that starts off the left edge has its box
+    // clipped, and the origin is what tells a compositor where the
+    // remaining pixels go.
+    origin_x: Int
+    // Where the mask's top-left corner sits vertically.
+    origin_y: Int
+    // The coverage bytes, `width * height` of them, row-major.
+    coverage: Bytes
+
+// How much a mask is allowed to cost.
+//
+// A budget that crosses the interface BEFORE anything is allocated.
+// The numbers in a path come out of a file, and a file can ask for a
+// petabyte; `RstTooLarge` carrying both numbers is what a caller gets
+// instead of an allocator failure.
+//
+// `@value`: two integers passed into every mask-producing call,
+// never a `Result` payload and never a boxed field of its own.
+pub @value
+struct RstLimits
+    // The most pixels one mask may cover.  64 Mi (8192 by 8192) is the
+    // default, which is a 64 MB buffer.
+    max_pixels: Int
+    // The most edges one path may contribute to the sweep.  A path is
+    // flattened before it is filled, and a curve with a tiny tolerance
+    // over a huge coordinate range flattens into millions of segments;
+    // this is the bound on that.
+    max_edges: Int
+
+// The defaults: 64 Mi pixels and 1 Mi edges.
+//
+// Published as a function rather than left to a caller to invent,
+// because a caller that has no opinion still has to pass something,
+// and two callers inventing different numbers is two programs that
+// refuse different files.
+pub fn default_limits() -> RstLimits []
+    todo("raster-nv.rastermask.default_limits")
+
+// A mask of `width` by `height` at an origin, fully transparent.
+//
+// `RstTooLarge` when the size is past the budget, which is the check
+// every mask-producing call in this package makes first.
+pub fn mask(width: Int, height: Int, origin_x: Int, origin_y: Int,
+            limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
+    todo("raster-nv.rastermask.mask")
+
+// A mask covering a rectangle of the target, fully opaque.
+//
+// The starting clip: a caller that clips to the whole image asks for
+// this once and intersects into it.
+pub fn full(width: Int, height: Int, origin_x: Int, origin_y: Int,
+            limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
+    todo("raster-nv.rastermask.full")
+
+// The integer rectangle a float bounding box needs, clipped to a
+// target of `w` by `h`.
+//
+// The arithmetic between "where the path is" and "which pixels the
+// mask covers": the box is rounded OUTWARD, because a pixel a curve
+// touches by a hundredth still has coverage, and rounding inward would
+// clip the edge of every shape by one pixel in a way that only shows
+// against a background.
+pub fn extent_for(bounds: geomrect.GeomRectF, w: Int, h: Int) -> geomrect.GeomRectI []
+    todo("raster-nv.rastermask.extent_for")
+
+// How many pixels a mask over that rectangle would cost.
+//
+// Published so a caller can ask before it asks, and so a tiling
+// renderer can decide how many tiles it needs without provoking a
+// refusal.
+pub fn cost_of(extent: geomrect.GeomRectI) -> Int []
+    todo("raster-nv.rastermask.cost_of")
+
+// ── Reading a mask ───────────────────────────────────────────────────
+
+// The coverage at a pixel of the TARGET, 0 outside the mask.
+//
+// Target coordinates rather than mask coordinates, because that is
+// what a compositor and a hit test both have, and converting at every
+// call site is where the origin gets forgotten.
+pub fn at(m: RstMask, x: Int, y: Int) -> Int []
+    todo("raster-nv.rastermask.at")
+
+// The mask's rectangle in target coordinates.
+pub fn extent(m: RstMask) -> geomrect.GeomRectI []
+    todo("raster-nv.rastermask.extent")
+
+// One row's coverage bytes, or nothing when `y` is outside.
+//
+// In mask coordinates, because a caller walking rows is walking the
+// mask.  For a compositor that wants the run rather than the pixels.
+pub fn row(m: RstMask, y: Int) -> ?Bytes []
+    todo("raster-nv.rastermask.row")
+
+// Whether two masks cover the same rectangle.
+//
+// The check `intersect`, `union` and `subtract` all make, published
+// because a caller that combines masks in a loop would rather ask once
+// than handle `RstExtentMismatch` three times.
+pub fn same_extent(a: RstMask, b: RstMask) -> Bool []
+    todo("raster-nv.rastermask.same_extent")
+
+// Whether every byte is zero.
+//
+// The early exit a compositor takes: a shape entirely outside the clip
+// produces an empty mask, and drawing it is a no-op that should cost
+// nothing.
+pub fn is_empty(m: RstMask) -> Bool []
+    todo("raster-nv.rastermask.is_empty")
+
+// Whether every byte is 255.
+//
+// The other early exit: a fully covered mask means the compositor can
+// write the source straight in with no per-pixel blend.
+pub fn is_opaque(m: RstMask) -> Bool []
+    todo("raster-nv.rastermask.is_opaque")
+
+// The smallest rectangle outside which every byte is zero.
+//
+// For a caller that built a mask from a generous box and wants to
+// trim it before caching — a glyph cache does exactly that, because
+// the path bounds of an `e` are looser than its ink.
+pub fn ink_extent(m: RstMask) -> geomrect.GeomRectI []
+    todo("raster-nv.rastermask.ink_extent")
+
+// ── Combining masks ──────────────────────────────────────────────────
+
+// The pixel-wise minimum: what both masks cover.
+//
+// THE CLIP OPERATION.  Clipping a fill to a shape is intersecting
+// their coverage, which is why a clip in this package is
+// anti-aliased and a clip to a rotated rectangle is not a special
+// case.  A multiply would be the alternative and is wrong for the
+// common case: two masks that each cover a pixel fully should leave it
+// fully covered, and 255 times 255 over 255 only just does.
+pub fn intersect(a: RstMask, b: RstMask) -> Result<RstMask, rastererror.RstFault> []
+    todo("raster-nv.rastermask.intersect")
+
+// The pixel-wise maximum: what either mask covers.
+pub fn union(a: RstMask, b: RstMask) -> Result<RstMask, rastererror.RstFault> []
+    todo("raster-nv.rastermask.union")
+
+// What `a` covers and `b` does not.
+//
+// For a caller drawing a shape with a hole punched by another shape,
+// where the two are not one path and a fill rule would not reach.
+pub fn subtract(a: RstMask, b: RstMask) -> Result<RstMask, rastererror.RstFault> []
+    todo("raster-nv.rastermask.subtract")
+
+// 255 minus every byte.
+pub fn invert(m: RstMask) -> RstMask []
+    todo("raster-nv.rastermask.invert")
+
+// Every byte scaled by `alpha`, which is `0.0 ..= 1.0`.
+//
+// Group opacity: an SVG `<g opacity="0.5">` is its children composited
+// together and then scaled, and a caller that scaled each child
+// separately would get a different, wrong picture wherever they
+// overlap.
+pub fn scale(m: RstMask, alpha: Float) -> RstMask []
+    todo("raster-nv.rastermask.scale")
+
+// A mask re-measured over a different rectangle, zero-filled where the
+// new rectangle reaches past the old.
+//
+// What `intersect` needs when two masks do not line up, and the one
+// place the extent mismatch is repaired rather than refused — by a
+// caller that asked for it, by name.
+pub fn retarget(m: RstMask, extent: geomrect.GeomRectI,
+                limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
+    todo("raster-nv.rastermask.retarget")
+
+// ── One bit a pixel ──────────────────────────────────────────────────
+
+// Every byte turned into 0 or 255 by comparing against `at_least`.
+//
+// The whole of the 1-bit conversion's first half.  128 is the usual
+// threshold; a caller rendering small text on e-paper often wants
+// lower, because anti-aliased stems are mostly partial coverage and a
+// high threshold erases them.
+pub fn threshold(m: RstMask, at_least: Int) -> RstMask []
+    todo("raster-nv.rastermask.threshold")
+
+// A thresholded mask's rows packed eight pixels to a byte, most
+// significant bit leftmost.
+//
+// The second half, and the layout every monochrome panel controller
+// and every 1-bit BMP expects.  Rows are padded to a whole byte, so
+// the stride is `(width + 7) / 8`.
+//
+// Published rather than left to the caller because the bit ORDER is
+// the thing a caller gets wrong once and then cannot see is wrong —
+// a picture packed the other way looks like static.
+pub fn pack_rows_1bit(m: RstMask) -> Bytes []
+    todo("raster-nv.rastermask.pack_rows_1bit")
+
+// How many bytes `pack_rows_1bit` would answer.
+pub fn packed_1bit_len(m: RstMask) -> Int []
+    todo("raster-nv.rastermask.packed_1bit_len")

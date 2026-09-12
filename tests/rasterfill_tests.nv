@@ -1,0 +1,163 @@
+// rasterfill_tests.nv — the sweep, the fill rule, and the pixel that
+// is exactly 128.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: raster-nv.<module>.<fn>`.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR: a 45-degree edge through the
+// middle of a pixel covers exactly half of it, and the mask says 128 —
+// not "about 128".  That is the whole difference between analytic
+// coverage and supersampling, it is the claim
+// `rasterfill.exact_coverage_is_claimed` makes, and it is a claim only
+// a test can hold to.
+//
+// THE SECOND: a five-pointed star drawn in one stroke has a HOLLOW
+// middle under even-odd and a FILLED one under non-zero.  It is the
+// one shape where the two rules visibly disagree, it is the example
+// the SVG specification itself uses, and a rasteriser that got it
+// wrong would pass every test written with rectangles.
+
+use std.test
+use geomrect
+use geomxform
+use geompoint
+use geompoly
+use svgpath
+use rastermask
+use rasterfill
+
+fn unit_clip() -> geomrect.GeomRectI
+    geomrect.of_xywh_i(0, 0, 64, 64)
+
+// A right triangle whose hypotenuse runs at 45 degrees through the
+// centre of the pixel at (0, 0).
+fn half_pixel_triangle() -> svgpath.SvgPath
+    svgpath.close(svgpath.line_to(svgpath.line_to(
+        svgpath.move_to(svgpath.empty(), 0.0, 0.0), 1.0, 0.0),
+        0.0, 1.0))
+
+// A five-pointed star drawn as one self-crossing ring.
+fn star() -> svgpath.SvgPath
+    svgpath.of_points([geompoint.ptf(16.0, 2.0), geompoint.ptf(22.0, 26.0),
+                       geompoint.ptf(2.0, 11.0), geompoint.ptf(30.0, 11.0),
+                       geompoint.ptf(10.0, 26.0)],
+                       true)
+
+@test
+fn test_a_half_covered_pixel_is_exactly_one_hundred_and_twenty_eight() [io]
+    test.case("THE CLAIM: coverage is integrated, not sampled")
+    test.assert(rasterfill.exact_coverage_is_claimed())
+
+    match rasterfill.fill(half_pixel_triangle(), geomxform.identity(), unit_clip(),
+                          GeomNonZero, rasterfill.default_flatten(),
+                          rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("so a 45-degree edge through a pixel's centre is 128, not 120 or 136")
+            test.assert(rastermask.at(m, 0, 0) == 128)
+
+    test.case("which seventeen supersampled levels cannot produce at all")
+    test.assert(rasterfill.default_flatten().tolerance <= 0.25)
+
+@test
+fn test_the_star_is_the_shape_where_the_two_fill_rules_disagree() [io]
+    let xf = geomxform.identity()
+    let clip = unit_clip()
+    let fl = rasterfill.default_flatten()
+    let lim = rastermask.default_limits()
+
+    test.case("THE CLAIM: non-zero fills the middle of a self-crossing ring")
+    match rasterfill.fill(star(), xf, clip, GeomNonZero, fl, lim)
+        Err(_) => test.assert(false)
+        Ok(m)  => test.assert(rastermask.at(m, 16, 14) == 255)
+
+    test.case("and even-odd leaves it hollow, which is the SVG specification's own example")
+    match rasterfill.fill(star(), xf, clip, GeomEvenOdd, fl, lim)
+        Err(_) => test.assert(false)
+        Ok(m)  => test.assert(rastermask.at(m, 16, 14) == 0)
+
+    test.case("the same disagreement shows in a point test, with no mask built")
+    test.assert(rasterfill.contains(star(), 16.0, 14.0, GeomNonZero, fl))
+    test.assert(rasterfill.contains(star(), 16.0, 14.0, GeomEvenOdd, fl) == false)
+
+    test.case("and the winding number is published, for a caller with a third rule")
+    test.assert(rasterfill.winding_at(star(), 16.0, 14.0, fl) == 2)
+
+@test
+fn test_the_rectangle_fast_path_answers_what_the_sweep_would() [io]
+    let r = geomrect.of_xywh(2.0, 2.0, 4.0, 4.0)
+    let clip = unit_clip()
+    let lim = rastermask.default_limits()
+
+    test.case("THE CLAIM: the fast path is an optimisation, not a second answer")
+    match rasterfill.fill_rect(r, clip, lim)
+        Err(_)   => test.assert(false)
+        Ok(fast) =>
+            match rasterfill.fill(svgpath.of_rect(r, 0.0, 0.0), geomxform.identity(), clip,
+                                  GeomNonZero, rasterfill.default_flatten(), lim)
+                Err(_)   => test.assert(false)
+                Ok(slow) =>
+                    test.assert(rastermask.same_extent(fast, slow))
+                    test.assert(rastermask.at(fast, 3, 3) == rastermask.at(slow, 3, 3))
+                    test.assert(rastermask.at(fast, 3, 3) == 255)
+
+@test
+fn test_a_convex_polygon_needs_no_winding_accumulation() [io]
+    let tri = geompoly.of_points_unchecked([geompoint.ptf(0.0, 0.0),
+                                            geompoint.ptf(10.0, 0.0),
+                                            geompoint.ptf(0.0, 10.0)])
+
+    test.case("THE CLAIM: two active edges a scanline, so the fill rule cannot change it")
+    test.assert(geompoly.is_convex(tri))
+    match rasterfill.fill_convex(tri, geomxform.identity(), unit_clip(),
+                                 rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  => test.assert(rastermask.at(m, 1, 1) == 255)
+
+@test
+fn test_a_path_mostly_off_screen_costs_the_pixels_it_touches() [io]
+    let far = svgpath.of_rect(geomrect.of_xywh(0 - 1000.0, 0 - 1000.0, 1001.0, 1001.0),
+                              0.0, 0.0)
+
+    test.case("THE CLAIM: the mask covers the bounds INTERSECTED with the clip")
+    let b = rasterfill.pixel_bounds(far, geomxform.identity(), unit_clip())
+    test.assert(geomrect.width_i(b) <= 2)
+
+    test.case("so a huge shape at the corner is a tiny mask, not a refusal")
+    match rasterfill.fill(far, geomxform.identity(), unit_clip(),
+                          GeomNonZero, rasterfill.default_flatten(),
+                          rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  => test.assert(m.width <= 2)
+
+@test
+fn test_a_collapsing_transform_is_refused_rather_than_drawn_as_nothing() [io]
+    let flat = geomxform.scaling(1.0, 0.0)
+
+    test.case("THE CLAIM: a caller composed that matrix, and the collapse is its bug")
+    test.assert(geomxform.is_invertible(flat) == false)
+    match rasterfill.fill(star(), flat, unit_clip(), GeomNonZero,
+                          rasterfill.default_flatten(), rastermask.default_limits())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(e.message() != "")
+
+@test
+fn test_the_flattening_tolerance_is_in_pixels_and_is_applied_after_the_transform() [io]
+    let curve = svgpath.quad_to(svgpath.move_to(svgpath.empty(), 0.0, 0.0),
+                                50.0, 100.0, 100.0, 0.0)
+    let fl = rasterfill.default_flatten()
+
+    test.case("THE CLAIM: the error that matters is how far off it is ON THE SCREEN")
+    let tiny = rasterfill.edge_count(curve, geomxform.scaling(0.05, 0.05), fl)
+    let big = rasterfill.edge_count(curve, geomxform.scaling(4.0, 4.0), fl)
+    test.assert(tiny < big)
+
+    test.case("so the same glyph at 8 pixels is far fewer segments than at 200")
+    test.assert(tiny >= 1)
+
+    test.case("and the flattened path is published, so a hit test uses the SAME polyline")
+    let flat = rasterfill.flatten_path(curve, geomxform.identity(), fl)
+    test.assert(svgpath.command_count(flat) >= svgpath.command_count(curve))
+
+    test.case("with a per-curve ceiling whatever the tolerance asks for")
+    test.assert(fl.max_per_curve >= 16)

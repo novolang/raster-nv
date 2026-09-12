@@ -1,0 +1,252 @@
+// rasterpaint.nv — what colour a pixel gets, given that something
+// covered it.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A PAINT IS A FUNCTION FROM A POINT TO A COLOUR, written as a value.
+// A solid paint ignores the point; a linear gradient projects it onto
+// an axis; a radial gradient measures a distance.  Writing them as one
+// enum rather than as three drawing calls is what lets `rasterdraw`
+// have ONE composite loop — and a single loop is the difference
+// between a blend mode being a parameter and a blend mode being three
+// more functions.
+//
+// THE GRADIENT STOPS ARE color-nv's, AND SO IS THE SPACE.  A gradient
+// interpolated in encoded sRGB passes through a muddy middle — the
+// classic red-to-green that goes through brown — and one interpolated
+// in Oklab does not.  Which is right depends on what the gradient is
+// FOR, so `ColorSpace` is a field and `colormix.sample` is the one
+// place the interpolation lives.  A package that hard-coded sRGB would
+// be a package every serious caller works around.
+//
+// AND ALPHA IS NOT PREMULTIPLIED ON THE WAY IN.  color-nv's `Srgba8`
+// stores unassociated alpha because PNG and QOI do; compositing needs
+// premultiplied, and `colormix.premultiply` is the conversion.  Doing
+// it once per paint rather than once per pixel is the implementation's
+// business; what the interface promises is that what a caller HANDS
+// OVER is unassociated, so a half-transparent white is a white and not
+// a grey.
+
+use geomxform
+use srgb
+use colorspace
+use colormix
+use rastererror
+
+// How a source colour is combined with what is already there.
+//
+// The subset of the Porter-Duff and separable blend modes that a
+// vector renderer uses.  Not all of PDF's or CSS's: the ones left out
+// are named in the README rather than approximated, because a blend
+// mode that is nearly right is a picture that is wrong in a way nobody
+// can name.
+pub enum RstBlend
+    // Source over destination: the ordinary one, and what every draw
+    // means unless it says otherwise.
+    RstOver
+    // Replace the destination entirely, alpha included.  What a caller
+    // clearing a region wants, and the only mode that can REMOVE
+    // opacity.
+    RstSrcCopy
+    // Keep the destination only where the source covers it.  The
+    // masking mode.
+    RstSrcIn
+    // Keep the destination only where the source does NOT cover it.
+    RstSrcOut
+    // Add the two, clamped.  What light does, and what a glow wants.
+    RstPlus
+    // Multiply the two.  Darkens; what a shadow wants.
+    RstMultiply
+    // The inverse of multiply.  Lightens.
+    RstScreen
+    // Multiply or screen depending on the destination.  The contrast
+    // mode.
+    RstOverlay
+    // The darker of the two, per channel.
+    RstDarken
+    // The lighter of the two, per channel.
+    RstLighten
+    // The absolute difference, per channel.  What a visual regression
+    // test subtracts with.
+    RstDifference
+
+// How a gradient behaves outside its own `0.0 ..= 1.0` span.
+pub enum RstSpread
+    // The end stops extend forever.  The usual answer.
+    RstPad
+    // The ramp repeats.
+    RstRepeat
+    // The ramp repeats, reversing each time, so the joins do not show.
+    RstReflect
+
+// What fills the covered pixels.
+//
+// One enum rather than three paint types, so `rasterdraw` has one
+// composite loop and a blend mode is a parameter rather than three
+// more functions.
+pub enum RstPaint
+    // One colour everywhere.
+    RstSolid(color: srgb.Srgba8)
+    // A ramp along the segment from `(x0, y0)` to `(x1, y1)`, in the
+    // paint's own coordinates.
+    //
+    // `RstDegenerateGradient` when the two points coincide: the
+    // parameter would be undefined at every pixel, and a renderer that
+    // filled with the first stop instead would be guessing.
+    RstLinear(x0: Float, y0: Float, x1: Float, y1: Float, stops: [colormix.ColorStop],
+              space: colorspace.ColorSpace, spread: RstSpread)
+    // A ramp outward from a centre to a radius.
+    //
+    // The two-circle form SVG allows — a focal point inside a larger
+    // circle — is NOT here and is named in the README: it needs a
+    // different parameter solve, it is rare, and approximating it with
+    // a concentric gradient is a visible difference a caller cannot
+    // see coming.
+    RstRadial(cx: Float, cy: Float, radius: Float, stops: [colormix.ColorStop],
+              space: colorspace.ColorSpace, spread: RstSpread)
+    // The colour at an angle around a centre — a conic or sweep
+    // gradient, which is what a pie chart's legend and a hue wheel
+    // both are.
+    RstSweep(cx: Float, cy: Float, start_radians: Float, stops: [colormix.ColorStop],
+             space: colorspace.ColorSpace, spread: RstSpread)
+
+// A solid opaque colour.
+pub fn solid(c: srgb.Srgb8) -> RstPaint []
+    todo("raster-nv.rasterpaint.solid")
+
+// A solid colour with coverage of its own.
+//
+// The alpha here and the mask's coverage MULTIPLY: a half-transparent
+// paint through a half-covered pixel is a quarter. Said out loud
+// because the alternative — the paint's alpha overriding the mask —
+// is what a naive implementation does and makes every anti-aliased
+// edge of a transparent shape hard.
+pub fn solid_alpha(c: srgb.Srgba8) -> RstPaint []
+    todo("raster-nv.rasterpaint.solid_alpha")
+
+// A two-stop linear gradient between two points.
+//
+// The common case written short; `RstLinear` is there for a caller
+// with a stop list.
+pub fn linear(x0: Float, y0: Float, x1: Float, y1: Float, from: srgb.Srgb8,
+              to: srgb.Srgb8) -> RstPaint []
+    todo("raster-nv.rasterpaint.linear")
+
+// A two-stop radial gradient.
+pub fn radial(cx: Float, cy: Float, radius: Float, from: srgb.Srgb8, to: srgb.Srgb8) -> RstPaint []
+    todo("raster-nv.rasterpaint.radial")
+
+// The space this package interpolates in when a caller does not say:
+// `SpaceOklab`.
+//
+// A decision, and the README argues it: sRGB is what every older
+// library does and produces the muddy middle; Oklab is what CSS Color
+// 4's `oklab()` interpolation gives and is perceptually even. The
+// short forms above use it, and `RstLinear` takes the space so a
+// caller reproducing an existing picture can ask for `SpaceSrgb` by
+// name.
+pub fn default_space() -> colorspace.ColorSpace []
+    todo("raster-nv.rasterpaint.default_space")
+
+// ── Reading a paint ──────────────────────────────────────────────────
+
+// Whether the paint is one colour everywhere.
+//
+// The early exit a compositor takes: a solid paint needs no per-pixel
+// position and no ramp lookup, which is most of what a plot and a user
+// interface draw.
+pub fn is_solid(p: RstPaint) -> Bool []
+    todo("raster-nv.rasterpaint.is_solid")
+
+// Whether the paint is opaque at every point.
+//
+// True for a solid with alpha 255 and for a gradient all of whose
+// stops are opaque. The condition under which `RstOver` can be
+// replaced by a straight write, which is worth knowing before a
+// million pixels.
+pub fn is_opaque(p: RstPaint) -> Bool []
+    todo("raster-nv.rasterpaint.is_opaque")
+
+// The colour at a point in the paint's own coordinates.
+//
+// The whole of the paint's meaning, as one call. Published rather than
+// kept inside the composite loop because it is how a test asserts a
+// gradient without rasterising anything, and how a caller samples a
+// ramp for a legend.
+pub fn color_at(p: RstPaint, x: Float, y: Float) -> srgb.Srgba8 []
+    todo("raster-nv.rasterpaint.color_at")
+
+// The gradient parameter at a point: where on the `0.0 ..= 1.0` ramp
+// it falls, before the spread is applied.
+//
+// For a caller debugging a gradient's geometry, and for the test that
+// asserts a linear gradient's parameter is 0.5 exactly half way along
+// its axis.
+pub fn parameter_at(p: RstPaint, x: Float, y: Float) -> Float []
+    todo("raster-nv.rasterpaint.parameter_at")
+
+// The stop list, empty for a solid paint.
+pub fn stops_of(p: RstPaint) -> [colormix.ColorStop] []
+    todo("raster-nv.rasterpaint.stops_of")
+
+// Whether the paint's geometry is usable.
+//
+// False for a linear gradient whose points coincide and a radial one
+// whose radius is not positive. The check every paint-consuming call
+// makes, published so a caller building paints from a document can
+// validate them all at once.
+pub fn is_usable(p: RstPaint) -> Bool []
+    todo("raster-nv.rasterpaint.is_usable")
+
+// A paint moved into another coordinate system.
+//
+// A gradient is defined in the shape's own space and drawn in pixels,
+// so the paint moves with the shape. Separate from the fill's
+// transform because an SVG `gradientTransform` is a second matrix that
+// applies only to the paint, and a package with one transform could
+// not express it.
+//
+// `RstSingularTransform` when the matrix collapses the plane.
+pub fn transformed(p: RstPaint, t: geomxform.GeomXform) -> Result<RstPaint, rastererror.RstFault> []
+    todo("raster-nv.rasterpaint.transformed")
+
+// ── Blending ─────────────────────────────────────────────────────────
+
+// The source-over blend of two pixels, which is `RstOver` at one
+// pixel.
+//
+// `colormix.over` is the same operation in color-nv, and this names it
+// here so the composite loop's definition is one call rather than a
+// paragraph. The two agreeing is a test.
+pub fn blend_over(src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 []
+    todo("raster-nv.rasterpaint.blend_over")
+
+// Any blend mode at one pixel.
+//
+// Published so a test can assert a mode's arithmetic without building
+// an image, and so a caller compositing something this package does
+// not draw — a video frame, a decoded photograph — can use the same
+// modes.
+pub fn blend(mode: RstBlend, src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 []
+    todo("raster-nv.rasterpaint.blend")
+
+// Whether a mode can make the destination MORE transparent.
+//
+// True for `RstSrcCopy`, `RstSrcIn` and `RstSrcOut`. The property that
+// matters to a caller drawing into a layer it will composite later:
+// the other modes only ever add coverage, so a layer drawn with them
+// can be accumulated in any order.
+pub fn reduces_alpha(mode: RstBlend) -> Bool []
+    todo("raster-nv.rasterpaint.reduces_alpha")
+
+// The blend modes this package implements.
+pub fn modes_supported() -> [RstBlend] []
+    todo("raster-nv.rasterpaint.modes_supported")
+
+// The name of a blend mode, in CSS's spelling.
+//
+// `source-over`, `multiply`, `screen` and the rest, so a caller
+// reading an SVG's `mix-blend-mode` can match on the string it found
+// rather than writing the table a second time.
+pub fn mode_name(mode: RstBlend) -> Str []
+    todo("raster-nv.rasterpaint.mode_name")

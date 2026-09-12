@@ -1,0 +1,103 @@
+// rastererror.nv — the four things a rasteriser refuses, and why there
+// are only four.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// MOST OF WHAT COULD GO WRONG IS NOT AN ERROR HERE.  A path outside
+// the mask is not an error, it is zero coverage.  A zero-width stroke
+// is not an error, it is the hairline case.  A gradient with one stop
+// is not an error, it is a solid colour.  A glyph the font does not
+// have is not an error, it is `.notdef`.  A rasteriser that refused
+// any of those would make the ordinary drawing call travel the failure
+// path, and every caller would write the same `??` to get back to the
+// answer the package should have given.
+//
+// What IS refused is a request whose ANSWER WOULD NOT FIT IN MEMORY or
+// whose arithmetic has no meaning — a mask bigger than the caller
+// budgeted for, a transform that collapses the plane, a degenerate
+// gradient geometry — because those are the cases where carrying on
+// produces a plausible picture that is wrong.
+
+// What a drawing call refuses.
+pub enum RstFault
+    // The mask the caller asked for is larger than `RstLimits.max_pixels`.
+    //
+    // THE REFUSAL THAT MATTERS.  A mask is one byte per pixel, and the
+    // rectangle it covers comes out of a path's bounding box — which
+    // comes out of coordinates in a file.  An SVG whose `<path>` runs
+    // to 1e9 asks for a petabyte, and a rasteriser that allocated
+    // first would be a denial of service with a picture on the front.
+    // So the size crosses the interface before anything is allocated,
+    // and the refusal carries BOTH numbers.
+    RstTooLarge(want: Int, limit: Int)
+    // The transform cannot be inverted: its determinant is zero, so it
+    // has flattened the plane onto a line.
+    //
+    // Refused rather than drawn as nothing, because the caller
+    // composed it out of several transforms and the one that collapsed
+    // is a bug worth being told about.
+    RstSingularTransform
+    // Two masks were combined whose rectangles are different sizes.
+    //
+    // A clip and a fill have to be measured over the same pixels or
+    // the intersection means nothing; `rastermask.same_extent` is the
+    // check, and this is what skipping it costs.
+    RstExtentMismatch(a_w: Int, a_h: Int, b_w: Int, b_h: Int)
+    // A gradient whose geometry has no direction: a linear gradient
+    // whose two points are the same, a radial one with a zero or
+    // negative radius.
+    //
+    // Not the same as a one-stop gradient, which is a solid colour and
+    // is fine; this is a gradient whose parameter `t` is undefined at
+    // every point.
+    RstDegenerateGradient
+    // A dash pattern that cannot advance: empty, or every entry zero
+    // or negative.
+    //
+    // A dashing loop over one of those does not terminate, which is
+    // the difference between this and the cases above.
+    RstBadDash
+    // The caller's image and the mask do not agree about how many
+    // channels a pixel has, or the pixel kind is one this package does
+    // not composite into.
+    //
+    // 16-bit kinds are the case that reaches this today, and
+    // `rasterdraw.kinds_supported` names what does not.
+    RstPixelKind(kind: Str)
+
+// One line a person can read, naming the numbers.
+//
+// ```novo
+// use rastererror
+//
+// fn main() [io]
+//     println(rastererror.describe(RstTooLarge(1000000000, 67108864)))
+// ```
+pub fn describe(f: RstFault) -> Str []
+    todo("raster-nv.rastererror.describe")
+
+// Whether the refusal is about a size the caller chose.
+//
+// True for `RstTooLarge` alone.  Published because the caller's
+// response is different in kind — raise the budget, or draw in tiles —
+// from every other fault here, which are all "the request was
+// malformed".
+pub fn is_budget(f: RstFault) -> Bool []
+    todo("raster-nv.rastererror.is_budget")
+
+// The `Error` implementation `Result<_, RstFault>` requires.
+//
+// Required before `Result<_, RstFault>` type-checks at all
+// (SPEC § 3.4), so this block is part of the interface rather than a
+// convenience on top of it.
+//
+// ```novo
+// use rastererror
+//
+// fn main() [io]
+//     let e: RstFault = RstSingularTransform
+//     println(e.message())
+// ```
+impl Error for RstFault
+    fn message(self) -> Str
+        todo("raster-nv.rastererror.message")

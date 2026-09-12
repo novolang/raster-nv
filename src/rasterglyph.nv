@@ -1,0 +1,237 @@
+// rasterglyph.nv — text: font-nv's outlines, this package's sweep, and
+// a cache the caller holds.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE CACHE HOLDS MASKS, AND THAT IS THE WHOLE ARGUMENT FOR IT.  A
+// terminal draws the same `e` in every colour its theme has; an editor
+// draws it selected and unselected; a plot draws its axis labels grey
+// and its title black.  A cache of PIXELS would hold one entry per
+// (glyph, size, colour) and would rasterise the same outline again for
+// every colour.  A cache of COVERAGE holds one entry per (glyph, size,
+// subpixel position) and the colour arrives at the composite — which
+// is the payoff of `rastermask`'s separation, arriving in the one place
+// that makes it worth having.
+//
+// AND THE CACHE IS THE CALLER'S VALUE, not a global.  `RstGlyphCache`
+// goes in and comes out of every call, so a caller decides how many
+// entries it keeps, when it is cleared, and whether there is one per
+// font or one per program.  A package-owned cache would be shared
+// state in a `core` package, which is the thing `core` is for not
+// having.
+//
+// SUBPIXEL POSITIONING IS IN THE KEY, and it is the field that decides
+// whether text looks even.  A glyph at x = 10.0 and the same glyph at
+// x = 10.33 cover different pixels, and a renderer that rounded the
+// pen to whole pixels before rasterising gets letters that jitter
+// closer and further apart along a line — visible as uneven spacing in
+// a paragraph, and the reason `subpixel_x` exists rather than being
+// rounded away.  Three positions is the usual compromise and
+// `subpixel_steps` publishes it.
+//
+// NO HINTING AND NO GAMMA CORRECTION, both named rather than omitted.
+// Hinting is font-nv's absent instruction interpreter; stem darkening
+// is a gamma decision that belongs to the caller's whole pipeline, and
+// `rastermask.scale` is where a caller that wants it applies it.
+
+use geomrect
+use geomxform
+use svgpath
+use fontshape
+use rastererror
+use rastermask
+use rasterpaint
+use rasterdraw
+
+// What identifies one cached glyph mask.
+//
+// `@value`: four integers, looked up and compared, never a `Result`
+// payload and never a boxed struct's field.
+//
+// The size is in 1/64ths of a pixel rather than a `Float`, because two
+// keys have to compare EQUAL and two floats computed by different
+// routes do not — a cache keyed on a float misses every time and grows
+// without bound, which is the failure that looks like a memory leak.
+pub @value
+struct RstGlyphKey
+    // The glyph id, from font-nv's `cmap` lookup.
+    glyph: Int
+    // Pixels per em, in 1/64ths.  16 pixels is 1024.
+    size_64: Int
+    // Which subpixel column the glyph's origin falls in, `0 ..<
+    // subpixel_steps()`.
+    subpixel_x: Int
+    // Which font this glyph came from, as a number the CALLER assigns.
+    //
+    // Not a name and not a hash of the file: the cache has no idea what
+    // a font is, and a caller with three fonts numbers them 0, 1, 2.
+    // Making it the caller's number is also what stops two fonts'
+    // glyph 42 from colliding, which is the bug a cache keyed on the
+    // glyph id alone has.
+    font_id: Int
+
+// One glyph, rasterised.
+//
+// The mask and where it sits relative to the pen — which is not the
+// same as the mask's own origin, because the pen is on the baseline
+// and the mask's top-left is above it.
+pub struct RstGlyphImage
+    // The coverage.
+    mask: rastermask.RstMask
+    // How far right of the pen the mask's left edge sits, in whole
+    // pixels.  Usually small and positive; negative for a glyph that
+    // reaches left of its origin, which an italic `f` does.
+    bearing_x: Int
+    // How far ABOVE the baseline the mask's top edge sits, in whole
+    // pixels.  Positive upward, which is the one place in this package
+    // that y grows up — because that is how a font's ascent is
+    // measured and converting it here would hide the sign.
+    bearing_y: Int
+    // The pen's advance for this glyph in 1/64ths of a pixel, so a run
+    // accumulates without rounding at every character.
+    advance_64: Int
+
+// A cache of rasterised glyphs, held by the caller.
+pub struct RstGlyphCache
+    // The keys, in insertion order.
+    keys: [RstGlyphKey]
+    // The masks, one per key.
+    images: [RstGlyphImage]
+    // The most entries before the oldest is dropped.  A bound rather
+    // than a policy: the cache evicts in insertion order, which is
+    // right for text because a paragraph's glyph set is small and
+    // stable, and a caller that wants something cleverer keeps two
+    // caches.
+    capacity: Int
+
+// How many subpixel positions the cache distinguishes: 3.
+//
+// One would make text jitter; 64 would make the cache 64 times larger
+// for a difference nobody can see. Three is what FreeType's and
+// Skia's default configurations both settle on, and publishing the
+// number means a caller sizing its cache can multiply by it.
+pub fn subpixel_steps() -> Int []
+    todo("raster-nv.rasterglyph.subpixel_steps")
+
+// An empty cache with a capacity.
+pub fn cache(capacity: Int) -> RstGlyphCache []
+    todo("raster-nv.rasterglyph.cache")
+
+// The key for a glyph at a pen position.
+//
+// The fractional part of `pen_x` is what picks the subpixel column,
+// which is the arithmetic a caller would otherwise have to get right
+// and would round away.
+pub fn key_for(glyph: Int, font_id: Int, px: Float, pen_x: Float) -> RstGlyphKey []
+    todo("raster-nv.rasterglyph.key_for")
+
+// How many entries the cache holds.
+pub fn cached_count(c: RstGlyphCache) -> Int []
+    todo("raster-nv.rasterglyph.cached_count")
+
+// Whether a key is already in the cache.
+pub fn is_cached(c: RstGlyphCache, k: RstGlyphKey) -> Bool []
+    todo("raster-nv.rasterglyph.is_cached")
+
+// The cached glyph for a key, or nothing.
+pub fn cached(c: RstGlyphCache, k: RstGlyphKey) -> ?RstGlyphImage []
+    todo("raster-nv.rasterglyph.cached")
+
+// A cache with everything dropped.
+pub fn cleared(c: RstGlyphCache) -> RstGlyphCache []
+    todo("raster-nv.rasterglyph.cleared")
+
+// How many bytes the cache's masks occupy.
+//
+// The number a caller sizing its capacity actually wants: entries are
+// a proxy and a CJK glyph's mask is twenty times an ASCII one's.
+pub fn cache_bytes(c: RstGlyphCache) -> Int []
+    todo("raster-nv.rasterglyph.cache_bytes")
+
+// ── Rasterising a glyph ──────────────────────────────────────────────
+
+// Rasterise one glyph outline into a mask, ignoring the cache.
+//
+// `outline` is font-nv's, in FONT UNITS; `scale` is
+// `fontmetric.scale_for_px` — which already flips the y axis — and
+// `pen_x` is where along the baseline the glyph sits, whose fractional
+// part chooses the subpixel offset.
+//
+// `advance_64` comes from the caller because it comes from `hmtx` and
+// this package does not read font tables; passing it through keeps the
+// glyph image a complete answer rather than half of one.
+pub fn rasterize(outline: svgpath.SvgPath, scale: geomxform.GeomXform, pen_x: Float,
+                 advance_64: Int, flatten: rasterfill.RstFlatten,
+                 limits: rastermask.RstLimits) -> Result<RstGlyphImage, rastererror.RstFault> []
+    todo("raster-nv.rasterglyph.rasterize")
+
+// Rasterise a glyph, or take it from the cache, and answer the cache
+// with it in.
+//
+// The call a text renderer makes per character.  Both values come
+// back, because the cache is the caller's and a function that mutated
+// one would be a function this package could not have.
+pub fn rasterize_cached(c: RstGlyphCache, k: RstGlyphKey, outline: svgpath.SvgPath,
+                        scale: geomxform.GeomXform, advance_64: Int, flatten: rasterfill.RstFlatten,
+                        limits: rastermask.RstLimits) -> Result<(RstGlyphCache, RstGlyphImage), rastererror.RstFault> []
+    todo("raster-nv.rasterglyph.rasterize_cached")
+
+// ── Drawing text ─────────────────────────────────────────────────────
+
+// Draw one cached glyph at a pen position.
+//
+// The paint is a paint like any other, so a gradient across a word is
+// one call rather than a feature: the mask is the glyph's and the
+// colour comes from wherever the pixel lands.
+pub fn draw_glyph(img: Image, g: RstGlyphImage, pen_x: Float, baseline_y: Float,
+                  paint: rasterpaint.RstPaint,
+                  o: rasterdraw.RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterglyph.draw_glyph")
+
+// Draw a whole shaped run, filling the cache as it goes.
+//
+// THE CALL A CONSUMER ACTUALLY MAKES.  `run` is font-nv's `FontShaped`
+// — glyphs with positions in font units, already kerned and ligated —
+// and `outlines` is one path per glyph in the run, which the caller
+// read with `fontread.read_outlines`.  The two lists line up, and
+// `RstExtentMismatch` is not what a mismatch answers: it is a
+// `FontComponentMissing`-shaped mistake the caller made, and
+// `run_is_consistent` is the check published so it can be made once.
+//
+// The cache comes back with whatever was added.
+pub fn draw_run(img: Image, c: RstGlyphCache, run: fontshape.FontShaped,
+                outlines: [svgpath.SvgPath], scale: geomxform.GeomXform, font_id: Int, pen_x: Float,
+                baseline_y: Float, paint: rasterpaint.RstPaint,
+                o: rasterdraw.RstDrawOpts) -> Result<(Image, RstGlyphCache), rastererror.RstFault> []
+    todo("raster-nv.rasterglyph.draw_run")
+
+// Whether a run and an outline list line up.
+//
+// One outline per glyph, in the same order.  Published because a
+// caller that got it wrong would draw the wrong letters in the right
+// places, which is the failure nobody debugs quickly.
+pub fn run_is_consistent(run: fontshape.FontShaped, outlines: [svgpath.SvgPath]) -> Bool []
+    todo("raster-nv.rasterglyph.run_is_consistent")
+
+// A run's coverage as ONE mask, with no image involved.
+//
+// For a caller that wants text as a clip — knockout text over a
+// photograph, a heading filled with a gradient that must not touch the
+// background — and for an atlas builder that wants the whole line in
+// one buffer.
+pub fn run_mask(c: RstGlyphCache, run: fontshape.FontShaped, outlines: [svgpath.SvgPath],
+                scale: geomxform.GeomXform, font_id: Int, pen_x: Float, baseline_y: Float,
+                clip: geomrect.GeomRectI, flatten: rasterfill.RstFlatten,
+                limits: rastermask.RstLimits) -> Result<(RstGlyphCache, rastermask.RstMask), rastererror.RstFault> []
+    todo("raster-nv.rasterglyph.run_mask")
+
+// Where a run's ink lands, in pixels.
+//
+// The run's advance is font-nv's answer and is about the PEN; this is
+// about the marks, which reach further — an italic `f` and a `j` both
+// overhang their advance. What a caller invalidating a region needs,
+// and what a caller centring a label wants instead of the advance.
+pub fn run_bounds(run: fontshape.FontShaped, outlines: [svgpath.SvgPath],
+                  scale: geomxform.GeomXform, pen_x: Float,
+                  baseline_y: Float) -> geomrect.GeomRectI []
+    todo("raster-nv.rasterglyph.run_bounds")

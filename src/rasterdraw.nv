@@ -1,0 +1,204 @@
+// rasterdraw.nv — compositing: a mask, a paint, and an image the
+// caller owns.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// EVERY CALL HERE TAKES AN `Image` AND ANSWERS AN `Image`.  There is no
+// canvas type, no surface, no context that holds state between calls.
+// A caller owns its pixels, hands them over, and gets them back — and
+// what that buys is not purity for its own sake:
+//
+//   THE PACKAGE CANNOT LEAK A BUFFER, because it never holds one.
+//
+//   A DRAW IS TESTABLE at the value level: fill an image, assert a
+//   pixel, with no setup and no teardown.
+//
+//   AND DOUBLE BUFFERING IS THE CALLER'S, which is the right place
+//   for it: a terminal, a plot and a static-site generator want three
+//   different answers about when a frame is finished, and a canvas
+//   object would have had to pick one.
+//
+// THE STATE THAT WOULD HAVE LIVED ON A CANVAS IS `RstDrawOpts` — the
+// blend mode, the clip, the paint transform — passed in, so two draws
+// with the same options are the same call rather than two calls
+// separated by a mutation somebody has to remember.
+//
+// WHAT plot-nv WOULD CALL.  plot-nv's `render` answers a list of
+// twelve draw operations and each target replays them; `plotraster` is
+// the replay for this package, and the whole of it is a `match` whose
+// arms are the four calls below.  A filled bar is
+//
+//   img = rasterdraw.fill_path(img, bar_path, rasterpaint.solid(op_color),
+//                              rasterdraw.opts_at(clip))!
+//
+// a data series is `stroke_path` with `rasterstroke.solid(op_width)`,
+// an axis label is `rasterglyph.draw_run`, and a gridline is
+// `fill_rect`.  No fifth kind of operation and no state between them.
+
+use geomrect
+use geomxform
+use image
+use srgb
+use svgpath
+use rastererror
+use rastermask
+use rasterfill
+use rasterpaint
+use rasterstroke
+
+// Everything a draw needs that is not the shape or the paint.
+//
+// A value rather than a canvas's mutable state: two draws with the
+// same options are the same call, and a clip that was set three
+// statements ago is not something a reader has to reconstruct.
+pub struct RstDrawOpts
+    // Which pixels may be touched at all.  Normally the image's own
+    // rectangle; a caller drawing a tile passes the tile.
+    clip_rect: geomrect.GeomRectI
+    // An anti-aliased clip, intersected with the fill's own coverage.
+    // Nothing means no shaped clip, which is the common case and
+    // costs nothing.
+    clip_mask: ?rastermask.RstMask
+    // How the source is combined with what is there.
+    blend: rasterpaint.RstBlend
+    // The transform from paint coordinates to pixels, applied to the
+    // paint ALONE — an SVG `gradientTransform`.  Separate from the
+    // shape's transform because they are two different matrices in
+    // every format that has gradients.
+    paint_xform: geomxform.GeomXform
+    // How curves are flattened.
+    flatten: rasterfill.RstFlatten
+    // How large a mask may be.
+    limits: rastermask.RstLimits
+
+// The ordinary options for an image of `w` by `h`: clip to the whole
+// image, source-over, no shaped clip, identity paint transform, the
+// default flattening and limits.
+pub fn opts(w: Int, h: Int) -> RstDrawOpts []
+    todo("raster-nv.rasterdraw.opts")
+
+// The ordinary options confined to a rectangle.
+//
+// The call a tiled renderer makes per tile, and what `plotraster`
+// would pass on every operation.
+pub fn opts_at(clip: geomrect.GeomRectI) -> RstDrawOpts []
+    todo("raster-nv.rasterdraw.opts_at")
+
+// The same options with a shaped clip.
+//
+// Named rather than left to a struct literal because the clip is the
+// field a caller most often changes for one draw and then has to
+// remember to change back — which a value cannot get wrong and a
+// canvas can.
+pub fn with_clip(o: RstDrawOpts, m: rastermask.RstMask) -> RstDrawOpts []
+    todo("raster-nv.rasterdraw.with_clip")
+
+// The same options with a different blend mode.
+pub fn with_blend(o: RstDrawOpts, b: rasterpaint.RstBlend) -> RstDrawOpts []
+    todo("raster-nv.rasterdraw.with_blend")
+
+// The pixel kinds this package composites into.
+//
+// `PixRgba8`, `PixRgb8`, `PixLumaAlpha8` and `PixLuma8`.  The 16-bit
+// kinds are NOT here and are named rather than half-supported: an
+// 8-bit mask against a 16-bit destination rounds the coverage twice,
+// and a caller working at 16 bits chose that precision for a reason.
+// `RstPixelKind` carries the kind's name when one reaches a draw.
+pub fn kinds_supported() -> [PixelKind] []
+    todo("raster-nv.rasterdraw.kinds_supported")
+
+// Whether an image can be drawn into.
+pub fn can_draw_into(img: Image) -> Bool []
+    todo("raster-nv.rasterdraw.can_draw_into")
+
+// ── The one composite ────────────────────────────────────────────────
+
+// Paint an image through a coverage mask.
+//
+// THE CALL EVERY OTHER ONE IN THIS MODULE IS WRITTEN ON.  A mask says
+// where, a paint says what colour, `opts` says how they combine and
+// what may be touched.  Publishing it rather than keeping it inside
+// means a caller that produced a mask some other way — a decoded
+// alpha channel, a blur, a mask it cached from last frame — composites
+// with the same loop, and that is the practical payoff of coverage
+// being a value.
+pub fn composite(img: Image, m: rastermask.RstMask, paint: rasterpaint.RstPaint,
+                 o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.composite")
+
+// ── The four calls a renderer makes ──────────────────────────────────
+
+// Fill a path.
+//
+// `rasterfill.fill` then `composite`.  The transform maps the path's
+// coordinates to pixels; the paint's own transform is in `opts`.
+//
+// ```novo ignore
+// img = rasterdraw.fill_path(img, bar, rasterpaint.solid(blue),
+//                            GeomNonZero, xform, rasterdraw.opts(w, h))!
+// ```
+pub fn fill_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint, rule: GeomFillRule,
+                 xform: geomxform.GeomXform,
+                 o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.fill_path")
+
+// Stroke a path.
+//
+// `rasterstroke.outline` then `rasterfill.fill` with the non-zero rule
+// `rasterstroke.fill_rule` names, then `composite`.  The rule is not a
+// parameter here, because there is only one right answer and offering
+// the other would be offering a picture with holes in it.
+pub fn stroke_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint,
+                   style: rasterstroke.RstStrokeStyle, xform: geomxform.GeomXform,
+                   o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.stroke_path")
+
+// Fill an axis-aligned rectangle.
+//
+// The fast path, and the most common operation in a plot and a user
+// interface both.  Identical to `fill_path` of the same rectangle,
+// which the test suite asserts rather than assumes.
+pub fn fill_rect(img: Image, r: geomrect.GeomRectF, paint: rasterpaint.RstPaint,
+                 o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.fill_rect")
+
+// Fill the whole clip rectangle with one colour, ignoring the blend
+// mode.
+//
+// The clear.  Separate from `fill_rect` with an opaque paint because
+// it REPLACES rather than blends — a caller clearing to transparent
+// wants the alpha gone, and `RstOver` with a transparent source is a
+// no-op.
+pub fn clear(img: Image, c: srgb.Srgba8, o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.clear")
+
+// ── Drawing one image into another ───────────────────────────────────
+
+// Composite a whole image at an offset.
+//
+// For a caller that decoded a photograph, or that rendered a layer and
+// is now flattening it.  Nearest-neighbour at integer offsets only:
+// scaling and rotating an image is resampling, which is image-nv's
+// `imageops`, and doing it badly here would be a second, worse answer
+// to a question that already has one.
+pub fn draw_image(dst: Image, src: Image, at_x: Int, at_y: Int,
+                  o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.draw_image")
+
+// A coverage mask as a greyscale image.
+//
+// `PixLuma8` with the mask's own bytes, which is the same layout
+// image-nv already uses — so a mask can be written out as a PNG with
+// no conversion.  What a test looks at when a picture is wrong, and
+// what a glyph atlas uploads to a GPU.
+pub fn mask_to_image(m: rastermask.RstMask) -> Image []
+    todo("raster-nv.rasterdraw.mask_to_image")
+
+// An image's alpha channel as a coverage mask.
+//
+// The other direction, and the reason `composite` is public: a decoded
+// PNG's alpha is a coverage mask, so a caller can use a photograph as
+// a clip without this package knowing what a PNG is.
+pub fn image_to_mask(img: Image, origin_x: Int, origin_y: Int,
+                     limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
+    todo("raster-nv.rasterdraw.image_to_mask")

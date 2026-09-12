@@ -1,0 +1,179 @@
+// rastermask_tests.nv — coverage is a value, and the value has an
+// extent.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: raster-nv.<module>.<fn>`.
+//
+// THE TWO ASSERTIONS THIS SUITE EXISTS FOR:
+//
+//   a mask's size crosses the interface BEFORE anything is allocated,
+//   because the numbers in a path come out of a file and a file can
+//   ask for a petabyte;
+//
+//   and a clip is `intersect`, which is a MINIMUM rather than a
+//   multiply — two masks that each cover a pixel fully leave it fully
+//   covered.
+//
+// THE VECTORS are tiny-skia's own: a `ClipMask` that is separate from
+// the pixmap, and coverage as one byte.
+
+use std.test
+use std.bytes
+use geomrect
+use rastermask
+use rastererror
+
+fn small_limits() -> rastermask.RstLimits
+    RstLimits { max_pixels: 1024, max_edges: 4096 }
+
+@test
+fn test_the_size_crosses_the_interface_before_anything_is_allocated() [io]
+    test.case("THE CLAIM: a mask within the budget is built")
+    match rastermask.mask(16, 16, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.assert(m.width == 16)
+            test.assert(m.height == 16)
+            test.assert(bytes.len(m.coverage) == 256)
+
+    test.case("and one past it is REFUSED carrying both numbers, not an allocator failure")
+    match rastermask.mask(64, 64, 0, 0, small_limits())
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(rastererror.is_budget(e))
+            test.assert(rastererror.describe(e) != "")
+
+    test.case("which is the difference between a refusal and a denial of service")
+    test.assert(rastermask.cost_of(geomrect.of_xywh_i(0, 0, 64, 64)) == 4096)
+
+    test.case("the defaults are published so two callers do not invent two budgets")
+    test.assert(rastermask.default_limits().max_pixels >= 1024)
+
+@test
+fn test_a_mask_carries_its_own_rectangle_because_coverage_is_mostly_zero() [io]
+    match rastermask.mask(8, 8, 100, 50, small_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: the origin says where the box sits in the TARGET")
+            test.assert(m.origin_x == 100)
+            test.assert(m.origin_y == 50)
+
+            test.case("so a lookup is in target coordinates and the origin is never forgotten")
+            test.assert(rastermask.at(m, 100, 50) == 0)
+            test.assert(rastermask.at(m, 0, 0) == 0)
+
+            test.case("and the extent is the rectangle a compositor walks")
+            let e = rastermask.extent(m)
+            test.assert(geomrect.width_i(e) == 8)
+
+            test.case("a fresh mask is empty, which is a compositor's early exit")
+            test.assert(rastermask.is_empty(m))
+            test.assert(rastermask.is_opaque(m) == false)
+
+@test
+fn test_a_full_mask_is_the_starting_clip() [io]
+    match rastermask.full(8, 8, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: a caller clipping to the whole image starts here")
+            test.assert(rastermask.is_opaque(m))
+            test.assert(rastermask.at(m, 4, 4) == 255)
+
+            test.case("and inverting it is empty, which is the identity a test can check")
+            test.assert(rastermask.is_empty(rastermask.invert(m)))
+
+@test
+fn test_a_clip_is_a_minimum_and_not_a_multiply() [io]
+    match rastermask.full(4, 4, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(a)  =>
+            test.case("THE CLAIM: two fully covering masks leave the pixel fully covered")
+            match rastermask.intersect(a, a)
+                Err(_) => test.assert(false)
+                Ok(m)  => test.assert(rastermask.at(m, 0, 0) == 255)
+
+            test.case("which 255 times 255 over 255 only just manages, and is why it is a min")
+            match rastermask.union(a, a)
+                Err(_) => test.assert(false)
+                Ok(m)  => test.assert(rastermask.is_opaque(m))
+
+            test.case("and subtracting a mask from itself leaves nothing")
+            match rastermask.subtract(a, a)
+                Err(_) => test.assert(false)
+                Ok(m)  => test.assert(rastermask.is_empty(m))
+
+@test
+fn test_two_masks_of_different_sizes_refuse_rather_than_guess() [io]
+    match rastermask.full(4, 4, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(a)  =>
+            match rastermask.full(8, 8, 0, 0, small_limits())
+                Err(_) => test.assert(false)
+                Ok(b)  =>
+                    test.case("THE CLAIM: an intersection over different pixels means nothing")
+                    test.assert(rastermask.same_extent(a, b) == false)
+                    match rastermask.intersect(a, b)
+                        Ok(_)  => test.assert(false)
+                        Err(e) => test.assert(rastererror.is_budget(e) == false)
+
+                    test.case("and `retarget` is the repair, asked for BY NAME")
+                    match rastermask.retarget(a, rastermask.extent(b), small_limits())
+                        Err(_) => test.assert(false)
+                        Ok(r)  => test.assert(rastermask.same_extent(r, b))
+
+@test
+fn test_group_opacity_scales_the_mask_and_not_each_child() [io]
+    match rastermask.full(4, 4, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: an SVG group's opacity applies to the composited result")
+            let half = rastermask.scale(m, 0.5)
+            test.assert(rastermask.at(half, 0, 0) >= 127)
+            test.assert(rastermask.at(half, 0, 0) <= 128)
+
+            test.case("and scaling to zero is the same as empty")
+            test.assert(rastermask.is_empty(rastermask.scale(m, 0.0)))
+
+@test
+fn test_the_pixel_box_is_rounded_OUTWARD_or_every_shape_loses_its_edge() [io]
+    let b = geomrect.of_xywh(0.4, 0.4, 2.2, 2.2)
+
+    test.case("THE CLAIM: a pixel a curve touches by a hundredth still has coverage")
+    let e = rastermask.extent_for(b, 100, 100)
+    test.assert(geomrect.width_i(e) == 3)
+    test.assert(geomrect.height_i(e) == 3)
+
+    test.case("and the box is clipped to the target, so an off-screen shape costs nothing")
+    let off = rastermask.extent_for(geomrect.of_xywh(200.0, 200.0, 10.0, 10.0), 100, 100)
+    test.assert(geomrect.is_empty_i(off))
+
+@test
+fn test_the_one_bit_conversion_is_a_threshold_and_a_packing() [io]
+    match rastermask.full(8, 2, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: an e-paper panel takes a threshold, not a second rasteriser")
+            let t = rastermask.threshold(m, 128)
+            test.assert(rastermask.at(t, 0, 0) == 255)
+
+            test.case("and the packing is eight pixels to a byte, most significant bit leftmost")
+            test.assert(rastermask.packed_1bit_len(m) == 2)
+            test.assert(bytes.len(rastermask.pack_rows_1bit(t)) == 2)
+
+            test.case("which is the bit ORDER a caller gets wrong once and cannot see")
+            let empty = rastermask.threshold(rastermask.invert(m), 128)
+            test.assert(rastermask.is_empty(empty))
+
+@test
+fn test_the_ink_extent_is_what_a_glyph_cache_trims_to() [io]
+    match rastermask.mask(16, 16, 0, 0, small_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: a path's bounds are looser than its ink")
+            test.assert(geomrect.is_empty_i(rastermask.ink_extent(m)))
+
+            test.case("and a row comes back in MASK coordinates, for a compositor walking runs")
+            match rastermask.row(m, 0)
+                Some(r) => test.assert(bytes.len(r) == 16)
+                None    => test.assert(false)
+            test.assert(rastermask.row(m, 99) == None)

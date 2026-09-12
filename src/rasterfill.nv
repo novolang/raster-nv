@@ -1,0 +1,184 @@
+// rasterfill.nv — the sweep: a path in, a coverage mask out, with the
+// anti-aliasing computed rather than sampled.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// ANALYTIC, WHICH IS A CLAIM WITH A TEST BEHIND IT.  There are two
+// ways to anti-alias a filled path.  Supersampling asks "is the shape
+// here?" at sixteen points in the pixel and counts the yeses, which
+// costs sixteen times the work and still quantises coverage to
+// seventeen levels — visible as banding on a shallow edge, which is
+// most of a letterform.  The analytic method integrates the exact
+// area the edges cut out of each pixel: one pass, exact answers, and
+// the property a test can actually assert — a 45-degree edge through
+// the middle of a pixel is exactly 128, not "about 128".
+//
+// `rasterfill.exact_coverage_is_claimed` is that promise as a
+// function, and the test suite asserts the half-covered pixel.
+//
+// THE SWEEP.  Flatten the path to line segments; build an edge list;
+// sort by top y; walk scanlines keeping an active edge list; and
+// accumulate a signed area and a running winding per cell.  The
+// winding is what makes the fill rule a parameter rather than two
+// algorithms: even-odd and non-zero read the same accumulated number
+// differently, at the end.
+//
+// NOTHING IS DRAWN HERE.  The answer is an `RstMask` — see
+// `rastermask`'s header for why coverage and colour are separate
+// values, and `rasterdraw` for the compositing that consumes one.
+
+use geomrect
+use geomxform
+use geompoly
+use svgpath
+use rastererror
+use rastermask
+
+// How finely a curve is broken into segments before the sweep.
+//
+// `@value`: two numbers passed into every fill, never a `Result`
+// payload.
+pub @value
+struct RstFlatten
+    // The largest distance, in PIXELS, between the flattened polyline
+    // and the true curve.  0.25 is the usual answer and is what makes
+    // a curve indistinguishable from smooth at one pixel per unit.
+    //
+    // In pixels rather than in path units, deliberately: the number
+    // that matters is how far the error is on the screen, so the
+    // tolerance is applied AFTER the transform and a glyph scaled to
+    // 8 pixels is flattened into far fewer segments than the same
+    // glyph at 200.
+    tolerance: Float
+    // The most segments one curve may become, whatever the tolerance
+    // asks for.  The guard against a curve with enormous coordinates
+    // flattening into millions of segments; the path's own total is
+    // bounded by `RstLimits.max_edges`.
+    max_per_curve: Int
+
+// The usual flattening: a quarter of a pixel, 256 segments a curve.
+pub fn default_flatten() -> RstFlatten []
+    todo("raster-nv.rasterfill.default_flatten")
+
+// Whether this package promises exact area coverage rather than
+// supersampled coverage.
+//
+// True, and it is a function so a test can assert the claim beside the
+// pixel value that demonstrates it.  A caller choosing between
+// rasterisers is choosing on exactly this, and a README sentence is
+// not something a test can read.
+pub fn exact_coverage_is_claimed() -> Bool []
+    todo("raster-nv.rasterfill.exact_coverage_is_claimed")
+
+// ── Filling ──────────────────────────────────────────────────────────
+
+// Rasterise a path into a coverage mask.
+//
+// THE CALL THIS PACKAGE EXISTS FOR.  `path` is in the caller's own
+// coordinates and `xform` maps them to pixels — which is how a glyph
+// outline in font units and an SVG path in user units reach the same
+// sweep without either being pre-scaled.
+//
+// `clip` is the target rectangle the mask is confined to, normally the
+// image's own bounds; the mask that comes back covers the path's
+// transformed bounding box intersected with it, so a shape mostly off
+// screen costs the pixels it actually touches.
+//
+// `RstTooLarge` before anything is allocated when the mask would be
+// past `limits.max_pixels`; `RstSingularTransform` when `xform`
+// collapses the plane.
+//
+// ```novo ignore
+// let m = rasterfill.fill(path, xform, clip,
+//                         GeomNonZero,
+//                         rasterfill.default_flatten(),
+//                         rastermask.default_limits())!
+// ```
+pub fn fill(path: svgpath.SvgPath, xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
+            rule: GeomFillRule, flatten: RstFlatten,
+            limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
+    todo("raster-nv.rasterfill.fill")
+
+// Rasterise several paths into ONE mask, as if they were one path.
+//
+// Not the same as filling each and taking the union: the fill rule
+// applies across the whole set, so a letter's counter and its outer
+// contour cancel under non-zero exactly as they do inside one glyph.
+// A caller that wants the union takes `rastermask.union`, and the two
+// being different calls is the point.
+pub fn fill_all(paths: [svgpath.SvgPath], xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
+                rule: GeomFillRule, flatten: RstFlatten,
+                limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
+    todo("raster-nv.rasterfill.fill_all")
+
+// Rasterise an axis-aligned rectangle, which needs no sweep at all.
+//
+// The fast path worth publishing: a rectangle's coverage is four edge
+// fractions and a solid middle, and a plot's bars, a table's rules and
+// a user interface's panels are almost all of them.  The result is
+// identical to `fill` of the same rectangle as a path, which the test
+// suite asserts.
+pub fn fill_rect(r: geomrect.GeomRectF, clip: geomrect.GeomRectI,
+                 limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
+    todo("raster-nv.rasterfill.fill_rect")
+
+// Rasterise a convex polygon, which needs no winding accumulation.
+//
+// The second fast path: a convex ring has exactly two active edges on
+// every scanline, so the sweep is a pair of x positions per row and
+// the fill rule cannot change the answer.  `geompoly.is_convex` is the
+// check a caller makes to decide.
+pub fn fill_convex(p: geompoly.GeomPoly, xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
+                   limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
+    todo("raster-nv.rasterfill.fill_convex")
+
+// ── Measuring before filling ─────────────────────────────────────────
+
+// Where a path lands on the pixel grid, before any mask is built.
+//
+// The call a tiling renderer and a size-budget check both make. Cheap:
+// the bounds of the transformed control points, widened by the curve's
+// own extrema, with no flattening.
+pub fn pixel_bounds(path: svgpath.SvgPath, xform: geomxform.GeomXform,
+                    clip: geomrect.GeomRectI) -> geomrect.GeomRectI []
+    todo("raster-nv.rasterfill.pixel_bounds")
+
+// How many segments flattening this path at this transform would
+// produce.
+//
+// For a caller sizing `RstLimits.max_edges`, and for a report that
+// wants to say which path in a document is the expensive one.
+pub fn edge_count(path: svgpath.SvgPath, xform: geomxform.GeomXform, flatten: RstFlatten) -> Int []
+    todo("raster-nv.rasterfill.edge_count")
+
+// The flattened path: every curve replaced by line segments.
+//
+// Published because it is the input to `rasterstroke` as well as to
+// the sweep, and because a caller doing its own hit testing wants the
+// same polyline the rasteriser used rather than a second flattening
+// with a different tolerance.
+pub fn flatten_path(path: svgpath.SvgPath, xform: geomxform.GeomXform,
+                    flatten: RstFlatten) -> svgpath.SvgPath []
+    todo("raster-nv.rasterfill.flatten_path")
+
+// ── Hit testing ──────────────────────────────────────────────────────
+
+// Whether a point is inside the path under a fill rule.
+//
+// The same winding accumulation the sweep uses, at one point, with no
+// mask built.  In the path's OWN coordinates, so a caller with a mouse
+// position applies the inverse transform first — which is one call
+// (`geomxform.invert`) and is how the package avoids owning a second,
+// pixel-flavoured coordinate space.
+pub fn contains(path: svgpath.SvgPath, at_x: Float, at_y: Float, rule: GeomFillRule,
+                flatten: RstFlatten) -> Bool []
+    todo("raster-nv.rasterfill.contains")
+
+// The winding number at a point, which `contains` reads through the
+// rule.
+//
+// Published because a caller implementing a different rule — a
+// positive-winding fill, which some CAD formats use — needs the number
+// and not the boolean.
+pub fn winding_at(path: svgpath.SvgPath, at_x: Float, at_y: Float, flatten: RstFlatten) -> Int []
+    todo("raster-nv.rasterfill.winding_at")

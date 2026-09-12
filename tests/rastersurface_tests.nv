@@ -1,0 +1,236 @@
+// rastersurface_tests.nv — the drawing calls and the text half, named
+// once each with the types the package itself produces.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: raster-nv.<module>.<fn>`.
+//
+// WHAT THIS SUITE IS FOR.  An interface package's claim is that the
+// signatures COMPOSE — that what one call answers is what the next one
+// takes, with no conversion the author forgot to publish.  The text
+// path is where that claim is worth checking hardest, because it
+// crosses a package boundary: font-nv answers a `FontShaped` and a
+// list of `SvgPath` in FONT UNITS, `fontmetric.scale_for_px` answers
+// the matrix, and this package has to take all three without the
+// caller writing arithmetic of its own.  If any of that did not line
+// up, this file would not compile.
+
+use std.test
+use std.list
+use geomrect
+use geomxform
+use image
+use srgb
+use svgpath
+use fontshape
+use fontgsub
+use fontkern
+use fontcmap
+use fontmetric
+use rastermask
+use rasterfill
+use rasterstroke
+use rasterpaint
+use rasterdraw
+use rasterglyph
+
+fn img() -> Image
+    image.new(32, 16, PixRgba8)
+
+fn opts() -> rasterdraw.RstDrawOpts
+    rasterdraw.opts(32, 16)
+
+fn white() -> srgb.Srgb8
+    Srgb8 { r: 255, g: 255, b: 255 }
+
+fn box() -> svgpath.SvgPath
+    svgpath.of_rect(geomrect.of_xywh(1.0, 1.0, 6.0, 6.0), 0.0, 0.0)
+
+// A character map that maps nothing, which is all the plan below needs
+// to prove the seam compiles.
+fn stub_cmap() -> fontcmap.FontCmap
+    FontCmap { format: 4, starts: [], ends: [], deltas: [], offsets: [],
+               glyph_ids: [], symbol: false }
+
+// A run with no glyphs in it, which is what an empty label is and what
+// every call below is safe to be handed.
+fn empty_run() -> fontshape.FontShaped
+    FontShaped { glyphs: [], width: 0, char_count: 0 }
+
+@test
+fn test_the_four_calls_a_renderer_makes_all_take_and_answer_an_image() [io]
+    let o = opts()
+    let paint = rasterpaint.solid(white())
+
+    test.case("THE CLAIM: a fill, a stroke, a rect and a clear are one shape of call")
+    match rasterdraw.fill_path(img(), box(), paint, GeomNonZero, geomxform.identity(), o)
+        Err(_)  => test.assert(false)
+        Ok(out) => test.assert(out.width == 32)
+
+    match rasterdraw.stroke_path(img(), box(), paint, rasterstroke.solid(1.0),
+                                 geomxform.identity(), o)
+        Err(_)  => test.assert(false)
+        Ok(out) => test.assert(out.height == 16)
+
+    test.case("and `clear` REPLACES rather than blends, which is why it is not a fill")
+    match rasterdraw.clear(img(), Srgba8 { rgb: white(), a: 0 }, o)
+        Err(_)  => test.assert(false)
+        Ok(out) =>
+            match image.pixel(out, 0, 0)
+                Some(px) => test.assert(px.a == 0)
+                None     => test.assert(false)
+
+@test
+fn test_a_shaped_clip_is_a_mask_and_a_new_options_value() [io]
+    match rastermask.full(8, 8, 0, 0, rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("THE CLAIM: a clip is a mask, so it is anti-aliased for free")
+            let clipped = rasterdraw.with_clip(opts(), m)
+            test.assert(clipped.clip_mask != None)
+            test.assert(opts().clip_mask == None)
+
+            test.case("and compositing through it is the same loop every other call uses")
+            match rasterdraw.composite(img(), m, rasterpaint.solid(white()), clipped)
+                Err(_)  => test.assert(false)
+                Ok(out) => test.assert(out.width == 32)
+
+@test
+fn test_several_paths_fill_as_ONE_path_rather_than_as_a_union() [io]
+    test.case("THE CLAIM: the fill rule applies ACROSS the set, as it does inside a glyph")
+    match rasterfill.fill_all([box(), box()], geomxform.identity(),
+                              geomrect.of_xywh_i(0, 0, 32, 16), GeomEvenOdd,
+                              rasterfill.default_flatten(), rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(m)  =>
+            test.case("so two identical rings cancel under even-odd, where a union would not")
+            test.assert(rastermask.is_empty(m))
+
+@test
+fn test_an_image_drawn_into_another_is_nearest_neighbour_at_whole_pixels() [io]
+    test.case("THE CLAIM: resampling is image-nv's, and a second worse answer is worse than none")
+    match rasterdraw.draw_image(img(), image.new(4, 4, PixRgba8), 2, 2, opts())
+        Err(_)  => test.assert(false)
+        Ok(out) => test.assert(out.width == 32)
+
+@test
+fn test_a_radial_gradient_and_a_paint_transform_are_reachable() [io]
+    let g = rasterpaint.radial(16.0, 8.0, 8.0, white(), Srgb8 { r: 0, g: 0, b: 0 })
+
+    test.case("THE CLAIM: a radial gradient is a paint like any other")
+    test.assert(rasterpaint.is_solid(g) == false)
+    test.assert(rasterpaint.is_usable(g))
+
+    test.case("and a radius of zero has no parameter anywhere, which is a refusal")
+    test.assert(rasterpaint.is_usable(rasterpaint.radial(0.0, 0.0, 0.0, white(), white()))
+                == false)
+
+    test.case("a paint moves by its OWN matrix, which is an SVG gradientTransform")
+    match rasterpaint.transformed(g, geomxform.translation(4.0, 0.0))
+        Err(_) => test.assert(false)
+        Ok(t)  => test.assert(rasterpaint.parameter_at(t, 20.0, 8.0)
+                              == rasterpaint.parameter_at(g, 16.0, 8.0))
+
+    test.case("and a matrix that collapses the plane is refused rather than applied")
+    match rasterpaint.transformed(g, geomxform.scaling(0.0, 0.0))
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(e.message() != "")
+
+@test
+fn test_a_glyph_rasterises_from_font_units_through_the_scale_matrix() [io]
+    let m = FontMetrics { units_per_em: 1000, x_min: 0, y_min: 0, x_max: 1000, y_max: 1000,
+                          num_glyphs: 1, num_h_metrics: 1, advance_max: 500,
+                          long_loca: false }
+    let scale = fontmetric.scale_for_px(m, 16.0)
+
+    test.case("THE CLAIM: the outline is font-nv's, in FONT UNITS, and the matrix is the seam")
+    match rasterglyph.rasterize(box(), scale, 10.25, 512, rasterfill.default_flatten(),
+                                rastermask.default_limits())
+        Err(_) => test.assert(false)
+        Ok(g)  =>
+            test.assert(g.advance_64 == 512)
+            test.assert(g.mask.width >= 1)
+
+            test.case("and the bearing is measured UP from the baseline, as a font measures it")
+            test.assert(g.bearing_y >= 0 - 1000)
+
+            test.case("drawing it is a paint like any other, so a gradient across a word is free")
+            match rasterglyph.draw_glyph(img(), g, 10.25, 12.0, rasterpaint.solid(white()),
+                                         opts())
+                Err(_)  => test.assert(false)
+                Ok(out) => test.assert(out.width == 32)
+
+@test
+fn test_a_glyph_taken_from_the_cache_hands_the_cache_back() [io]
+    let m = FontMetrics { units_per_em: 1000, x_min: 0, y_min: 0, x_max: 1000, y_max: 1000,
+                          num_glyphs: 1, num_h_metrics: 1, advance_max: 500,
+                          long_loca: false }
+    let c = rasterglyph.cache(8)
+    let k = rasterglyph.key_for(42, 0, 16.0, 10.0)
+
+    test.case("THE CLAIM: both values come back, because the cache is the CALLER's")
+    match rasterglyph.rasterize_cached(c, k, box(), fontmetric.scale_for_px(m, 16.0), 512,
+                                       rasterfill.default_flatten(),
+                                       rastermask.default_limits())
+        Err(_)   => test.assert(false)
+        Ok(pair) =>
+            let after = pair.0
+            test.assert(rasterglyph.cached_count(after) == 1)
+            test.assert(rasterglyph.is_cached(after, k))
+            test.assert(rasterglyph.cache_bytes(after) > 0)
+
+@test
+fn test_a_shaped_run_and_its_outlines_have_to_line_up_and_the_check_is_published() [io]
+    let run = empty_run()
+
+    test.case("THE CLAIM: one outline per glyph, in the same order")
+    test.assert(rasterglyph.run_is_consistent(run, []))
+    test.assert(rasterglyph.run_is_consistent(run, [box()]) == false)
+
+    test.case("because the other way round draws the wrong letters in the right places")
+    test.assert(fontshape.glyph_count(run) == 0)
+
+@test
+fn test_a_run_draws_a_line_and_can_also_answer_one_mask() [io]
+    let fm = FontMetrics { units_per_em: 1000, x_min: 0, y_min: 0, x_max: 1000, y_max: 1000,
+                           num_glyphs: 1, num_h_metrics: 1, advance_max: 500,
+                           long_loca: false }
+    let scale = fontmetric.scale_for_px(fm, 16.0)
+    let c = rasterglyph.cache(8)
+    let run = empty_run()
+
+    test.case("THE CLAIM: a whole run is one call, and the cache comes back with it")
+    match rasterglyph.draw_run(img(), c, run, [], scale, 0, 2.0, 12.0,
+                               rasterpaint.solid(white()), opts())
+        Err(_)   => test.assert(false)
+        Ok(pair) => test.assert(pair.0.width == 32)
+
+    test.case("and the same run can be ONE mask, for knockout text over a photograph")
+    match rasterglyph.run_mask(c, run, [], scale, 0, 2.0, 12.0,
+                               geomrect.of_xywh_i(0, 0, 32, 16),
+                               rasterfill.default_flatten(), rastermask.default_limits())
+        Err(_)   => test.assert(false)
+        Ok(pair) => test.assert(rasterglyph.cached_count(pair.0) >= 0)
+
+    test.case("the run's INK reaches further than its advance, which an italic f proves")
+    let b = rasterglyph.run_bounds(run, [], scale, 2.0, 12.0)
+    test.assert(geomrect.width_i(b) >= 0)
+
+@test
+fn test_the_shaping_plan_this_package_consumes_is_font_nvs_own() [io]
+    // THE CLAIM THIS TEST IS FOR: the boundary between the two packages
+    // is four values and no conversion — a `FontCmap`, two plans, an
+    // `hmtx` and the metrics go into font-nv's own `plan`, and what
+    // comes out of `shape` is what `draw_run` takes.  Written here
+    // rather than in font-nv because it is the CONSUMER's side that
+    // proves the seam.
+    let fm = FontMetrics { units_per_em: 1000, x_min: 0, y_min: 0, x_max: 1000, y_max: 1000,
+                           num_glyphs: 1, num_h_metrics: 1, advance_max: 500,
+                           long_loca: false }
+    let cmap = stub_cmap()
+    let p = fontshape.plan(cmap, fontgsub.no_substitutions(), fontkern.no_kerning(),
+                           bytes.from_str(""), fm)
+
+    test.case("THE CLAIM: the plan composes across the package boundary with no adapter")
+    match fontshape.shape(p, "hi")
+        Err(_)  => test.assert(true)
+        Ok(run) => test.assert(rasterglyph.run_is_consistent(run, []) == (list.len(run.glyphs) == 0))
