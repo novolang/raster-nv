@@ -1,6 +1,6 @@
 [package]
 name        = "raster-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "A scanline rasteriser with analytic anti-aliasing: paths in, an 8-bit COVERAGE mask out, and compositing as a separate step — so one rasterisation serves every colour, a clip is the same value intersected, and a glyph cache holds masks rather than pixels.  Strokes, dashes and text are path-to-path or mask-producing operations over geometry-nv, svg-nv, color-nv, image-nv and font-nv; the caller owns the image and the cache.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
