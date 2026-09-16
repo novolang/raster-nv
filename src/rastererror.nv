@@ -1,5 +1,5 @@
-// rastererror.nv — the four things a rasteriser refuses, and why there
-// are only four.
+// rastererror.nv — the six things a rasteriser refuses, and why there
+// are only six.
 //
 // Every body here is a `todo()`; the signatures are the design.
 //
