@@ -1,6 +1,6 @@
 [package]
 name        = "raster-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "A scanline rasteriser with analytic anti-aliasing: paths in, an 8-bit COVERAGE mask out, and compositing as a separate step — so one rasterisation serves every colour, a clip is the same value intersected, and a glyph cache holds masks rather than pixels.  Strokes, dashes and text are path-to-path or mask-producing operations over geometry-nv, svg-nv, color-nv, image-nv and font-nv; the caller owns the image and the cache.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -43,7 +43,7 @@ novo        = ">= 0.8.9"
 # declared here would mean a caller converting between two enums that
 # have the same two variants — with `E2004` waiting for the program
 # that ends up with both.
-geometry-nv = "^0.0.1"
+geometry-nv = "^0.1.0"
 
 # svg-nv, for `SvgPath` and `SvgPathCmd`: the one typed path on the
 # grid, and what font-nv's outlines already are.
@@ -53,7 +53,7 @@ geometry-nv = "^0.0.1"
 # belongs in geometry-nv.  Until it moves, a rasteriser that took a
 # path type of its own would force every caller to convert a value that
 # is already the right shape.
-svg-nv = "^0.0.1"
+svg-nv = "^0.1.0"
 
 # color-nv, for `Srgb8`, `Srgba8`, `ColorStop` and `ColorSpace`.
 #
@@ -61,7 +61,7 @@ svg-nv = "^0.0.1"
 # IS `ColorSpace`, which is what makes an Oklab gradient one argument
 # rather than a second gradient type.  `colormix.over` is the
 # source-over blend this package's default mode is defined as.
-color-nv = "^0.0.1"
+color-nv = "^0.1.1"
 
 # image-nv, for `Image` and `PixelKind`: the buffer the caller owns
 # and this package draws into.
@@ -69,7 +69,7 @@ color-nv = "^0.0.1"
 # Declaring a target type of its own would mean a caller converting
 # between two flat pixel buffers to move between png-nv and this, which
 # is the whole reason image-nv sits at the bottom of the imaging stack.
-image-nv = "^0.0.1"
+image-nv = "^0.0.3"
 
 # font-nv, by PATH while both are being developed together.
 #
@@ -85,4 +85,4 @@ image-nv = "^0.0.1"
 # units, `GeomXform` from `fontmetric.scale_for_px`, and
 # `FontShaped` for a whole run.  Every other module is reachable
 # without it.
-font-nv = "^0.0.1"
+font-nv = "^0.0.3"
