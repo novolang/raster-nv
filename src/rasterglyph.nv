@@ -42,6 +42,7 @@ use rastererror
 use rastermask
 use rasterpaint
 use rasterdraw
+use rasterfill
 
 // What identifies one cached glyph mask.
 //
