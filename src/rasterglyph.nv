@@ -1,8 +1,6 @@
 // rasterglyph.nv — text: font-nv's outlines, this package's sweep, and
 // a cache the caller holds.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THE CACHE HOLDS MASKS, AND THAT IS THE WHOLE ARGUMENT FOR IT.  A
 // terminal draws the same `e` in every colour its theme has; an editor
 // draws it selected and unselected; a plot draws its axis labels grey
@@ -112,11 +110,11 @@ pub struct RstGlyphCache
 // Skia's default configurations both settle on, and publishing the
 // number means a caller sizing its cache can multiply by it.
 pub fn subpixel_steps() -> Int []
-    todo("raster-nv.rasterglyph.subpixel_steps")
+    3
 
 // An empty cache with a capacity.
 pub fn cache(capacity: Int) -> RstGlyphCache []
-    todo("raster-nv.rasterglyph.cache")
+    RstGlyphCache { keys: [], images: [], capacity: capacity }
 
 // The key for a glyph at a pen position.
 //
@@ -124,30 +122,37 @@ pub fn cache(capacity: Int) -> RstGlyphCache []
 // which is the arithmetic a caller would otherwise have to get right
 // and would round away.
 pub fn key_for(glyph: Int, font_id: Int, px: Float, pen_x: Float) -> RstGlyphKey []
-    todo("raster-nv.rasterglyph.key_for")
+    RstGlyphKey { glyph: glyph, size_64: math.round(px * 64.0) as Int, subpixel_x: column_of(pen_x),
+                  font_id: font_id }
 
 // How many entries the cache holds.
 pub fn cached_count(c: RstGlyphCache) -> Int []
-    todo("raster-nv.rasterglyph.cached_count")
+    list.len(c.keys)
 
 // Whether a key is already in the cache.
 pub fn is_cached(c: RstGlyphCache, k: RstGlyphKey) -> Bool []
-    todo("raster-nv.rasterglyph.is_cached")
+    index_of(c, k) >= 0
 
 // The cached glyph for a key, or nothing.
 pub fn cached(c: RstGlyphCache, k: RstGlyphKey) -> ?RstGlyphImage []
-    todo("raster-nv.rasterglyph.cached")
+    let i = index_of(c, k)
+    if i < 0
+        return None
+    Some(c.images[i])
 
 // A cache with everything dropped.
 pub fn cleared(c: RstGlyphCache) -> RstGlyphCache []
-    todo("raster-nv.rasterglyph.cleared")
+    cache(c.capacity)
 
 // How many bytes the cache's masks occupy.
 //
 // The number a caller sizing its capacity actually wants: entries are
 // a proxy and a CJK glyph's mask is twenty times an ASCII one's.
 pub fn cache_bytes(c: RstGlyphCache) -> Int []
-    todo("raster-nv.rasterglyph.cache_bytes")
+    var total = 0
+    for g in c.images
+        total = total + bytes.len(g.mask.coverage)
+    total
 
 // ── Rasterising a glyph ──────────────────────────────────────────────
 
@@ -164,7 +169,15 @@ pub fn cache_bytes(c: RstGlyphCache) -> Int []
 pub fn rasterize(outline: svgpath.SvgPath, scale: geomxform.GeomXform, pen_x: Float,
                  advance_64: Int, flatten: rasterfill.RstFlatten,
                  limits: rastermask.RstLimits) -> Result<RstGlyphImage, rastererror.RstFault> []
-    todo("raster-nv.rasterglyph.rasterize")
+    let sub = pen_x - math.floor(pen_x)
+    let placed = geomxform.compose(scale, geomxform.translation(sub, 0.0))
+    let room = geomrect.of_xywh_i(0 - room_edge(), 0 - room_edge(), 2 * room_edge(), 2 * room_edge())
+    let box = rasterfill.pixel_bounds(outline, placed, room)
+    let mask = match rasterfill.fill(outline, placed, box, GeomNonZero, flatten, limits)
+        Err(e) => return Err(e)
+        Ok(m)  => m
+    Ok(RstGlyphImage { mask: mask, bearing_x: mask.origin_x, bearing_y: 0 - mask.origin_y,
+                       advance_64: advance_64 })
 
 // Rasterise a glyph, or take it from the cache, and answer the cache
 // with it in.
@@ -175,7 +188,22 @@ pub fn rasterize(outline: svgpath.SvgPath, scale: geomxform.GeomXform, pen_x: Fl
 pub fn rasterize_cached(c: RstGlyphCache, k: RstGlyphKey, outline: svgpath.SvgPath,
                         scale: geomxform.GeomXform, advance_64: Int, flatten: rasterfill.RstFlatten,
                         limits: rastermask.RstLimits) -> Result<(RstGlyphCache, RstGlyphImage), rastererror.RstFault> []
-    todo("raster-nv.rasterglyph.rasterize_cached")
+    let i = index_of(c, k)
+    if i >= 0
+        return Ok((c, c.images[i]))
+    let g = match rasterize(outline, scale, (k.subpixel_x as Float + 0.5) / subpixel_steps() as Float,
+                            advance_64, flatten, limits)
+        Err(e) => return Err(e)
+        Ok(g)  => g
+    var keys = list.clone(c.keys)
+    var images = list.clone(c.images)
+    if list.len(keys) >= c.capacity and not list.is_empty(keys)
+        keys = keys[1:]
+        images = images[1:]
+    if c.capacity > 0
+        list.push(keys, k)
+        list.push(images, g)
+    Ok((RstGlyphCache { keys: keys, images: images, capacity: c.capacity }, g))
 
 // ── Drawing text ─────────────────────────────────────────────────────
 
@@ -187,7 +215,7 @@ pub fn rasterize_cached(c: RstGlyphCache, k: RstGlyphKey, outline: svgpath.SvgPa
 pub fn draw_glyph(img: Image, g: RstGlyphImage, pen_x: Float, baseline_y: Float,
                   paint: rasterpaint.RstPaint,
                   o: rasterdraw.RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterglyph.draw_glyph")
+    rasterdraw.composite(img, placed_mask(g, pen_x, baseline_y), paint, o)
 
 // Draw a whole shaped run, filling the cache as it goes.
 //
@@ -204,7 +232,20 @@ pub fn draw_run(img: Image, c: RstGlyphCache, run: fontshape.FontShaped,
                 outlines: [svgpath.SvgPath], scale: geomxform.GeomXform, font_id: Int, pen_x: Float,
                 baseline_y: Float, paint: rasterpaint.RstPaint,
                 o: rasterdraw.RstDrawOpts) -> Result<(Image, RstGlyphCache), rastererror.RstFault> []
-    todo("raster-nv.rasterglyph.draw_run")
+    var cache = c
+    var out = img
+    for i in 0..math.min(list.len(run.glyphs), list.len(outlines))
+        let pen = pen_x + scale.a * run.glyphs[i].x as Float
+        let k = RstGlyphKey { glyph: run.glyphs[i].glyph, size_64: run_size(scale),
+                              subpixel_x: column_of(pen), font_id: font_id }
+        match rasterize_cached(cache, k, outlines[i], scale, 0, o.flatten, o.limits)
+            Err(e)        => return Err(e)
+            Ok((next, g)) =>
+                cache = next
+                match draw_glyph(out, g, pen, baseline_y, paint, o)
+                    Err(e)    => return Err(e)
+                    Ok(drawn) => out = drawn
+    Ok((out, cache))
 
 // Whether a run and an outline list line up.
 //
@@ -212,7 +253,7 @@ pub fn draw_run(img: Image, c: RstGlyphCache, run: fontshape.FontShaped,
 // caller that got it wrong would draw the wrong letters in the right
 // places, which is the failure nobody debugs quickly.
 pub fn run_is_consistent(run: fontshape.FontShaped, outlines: [svgpath.SvgPath]) -> Bool []
-    todo("raster-nv.rasterglyph.run_is_consistent")
+    list.len(run.glyphs) == list.len(outlines)
 
 // A run's coverage as ONE mask, with no image involved.
 //
@@ -224,7 +265,26 @@ pub fn run_mask(c: RstGlyphCache, run: fontshape.FontShaped, outlines: [svgpath.
                 scale: geomxform.GeomXform, font_id: Int, pen_x: Float, baseline_y: Float,
                 clip: geomrect.GeomRectI, flatten: rasterfill.RstFlatten,
                 limits: rastermask.RstLimits) -> Result<(RstGlyphCache, rastermask.RstMask), rastererror.RstFault> []
-    todo("raster-nv.rasterglyph.run_mask")
+    var cache = c
+    let want = geomrect.intersection_i(run_bounds(run, outlines, scale, pen_x, baseline_y), clip)
+    var out = match rastermask.mask(math.max(geomrect.width_i(want), 1), math.max(geomrect.height_i(want), 1),
+                                    want.min.x, want.min.y, limits)
+        Err(e) => return Err(e)
+        Ok(m)  => m
+    if geomrect.is_empty_i(want)
+        return Ok((cache, out))
+    var buf = bytes.clone(out.coverage)
+    for i in 0..math.min(list.len(run.glyphs), list.len(outlines))
+        let pen = pen_x + scale.a * run.glyphs[i].x as Float
+        let k = RstGlyphKey { glyph: run.glyphs[i].glyph, size_64: run_size(scale),
+                              subpixel_x: column_of(pen), font_id: font_id }
+        match rasterize_cached(cache, k, outlines[i], scale, 0, flatten, limits)
+            Err(e)        => return Err(e)
+            Ok((next, g)) =>
+                cache = next
+                add_into(var buf, out, placed_mask(g, pen, baseline_y))
+    Ok((cache, RstMask { width: out.width, height: out.height, origin_x: out.origin_x,
+                         origin_y: out.origin_y, coverage: buf }))
 
 // Where a run's ink lands, in pixels.
 //
@@ -235,4 +295,59 @@ pub fn run_mask(c: RstGlyphCache, run: fontshape.FontShaped, outlines: [svgpath.
 pub fn run_bounds(run: fontshape.FontShaped, outlines: [svgpath.SvgPath],
                   scale: geomxform.GeomXform, pen_x: Float,
                   baseline_y: Float) -> geomrect.GeomRectI []
-    todo("raster-nv.rasterglyph.run_bounds")
+    let room = geomrect.of_xywh_i(0 - room_edge(), 0 - room_edge(), 2 * room_edge(), 2 * room_edge())
+    var box = geomrect.empty_i()
+    for i in 0..math.min(list.len(run.glyphs), list.len(outlines))
+        let pen = pen_x + scale.a * run.glyphs[i].x as Float
+        let at = geomxform.compose(scale, geomxform.translation(pen, baseline_y))
+        let b = rasterfill.pixel_bounds(outlines[i], at, room)
+        if not geomrect.is_empty_i(b)
+            if geomrect.is_empty_i(box)
+                box = b
+            else
+                box = geomrect.union_i(box, b)
+    box
+
+// ── Placing glyphs ───────────────────────────────────────────────────
+
+// How far from the origin a glyph's pixels may reach.
+fn room_edge() -> Int
+    1048576
+
+// The subpixel column a pen position falls in.
+fn column_of(pen_x: Float) -> Int
+    let sub = pen_x - math.floor(pen_x)
+    math.min(subpixel_steps() - 1, (sub * subpixel_steps() as Float) as Int)
+
+// The size a run's glyphs are keyed on: the scale's horizontal factor,
+// in 1/65536ths, since a run carries font units and no em.
+fn run_size(scale: geomxform.GeomXform) -> Int
+    math.round(math.abs(scale.a) * 65536.0) as Int
+
+fn index_of(c: RstGlyphCache, k: RstGlyphKey) -> Int
+    for i in 0..list.len(c.keys)
+        let q = c.keys[i]
+        if q.glyph == k.glyph and q.size_64 == k.size_64 and q.subpixel_x == k.subpixel_x
+                and q.font_id == k.font_id
+            return i
+    -1
+
+// The glyph's mask where the pen puts it: the whole pixel of the pen
+// plus the bearing across, the rounded baseline less the bearing up.
+fn placed_mask(g: RstGlyphImage, pen_x: Float, baseline_y: Float) -> rastermask.RstMask
+    RstMask { width: g.mask.width, height: g.mask.height,
+              origin_x: math.floor(pen_x) as Int + g.bearing_x,
+              origin_y: math.floor(baseline_y + 0.5) as Int - g.bearing_y,
+              coverage: g.mask.coverage }
+
+// A mask's coverage merged into another over their common pixels, the
+// way two shapes cover a pixel together.
+fn add_into(var buf: Bytes, into: rastermask.RstMask, m: rastermask.RstMask)
+    let box = geomrect.intersection_i(rastermask.extent(into), rastermask.extent(m))
+    if not geomrect.is_empty_i(box)
+        for y in box.min.y..box.max.y
+            for x in box.min.x..box.max.x
+                let at = (y - into.origin_y) * into.width + (x - into.origin_x)
+                let a = bytes.byte_at(buf, at) ?? 0
+                let b = rastermask.at(m, x, y)
+                bytes.set_u8(buf, at, 255 - (255 - a) * (255 - b) / 255)

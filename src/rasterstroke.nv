@@ -1,7 +1,5 @@
 // rasterstroke.nv — a stroke is a PATH, not a drawing operation.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THE SHAPE OF THIS MODULE, AND WHY IT IS PATH-TO-PATH.  Stroking a
 // path means walking it, offsetting by half the width to the left and
 // to the right, joining the offsets at each corner and capping them at
@@ -35,7 +33,10 @@
 // self-intersections a tight curve produces, and the non-zero fill is
 // what makes the result look right anyway.
 
+use geompoint
 use geomrect
+use geomxform
+use rasterfill
 use svgpath
 use rastererror
 
@@ -94,7 +95,8 @@ pub struct RstStrokeStyle
 // because a plot's polyline is the first consumer and a miter on a
 // data series produces spikes wherever the data turns sharply.
 pub fn solid(width: Float) -> RstStrokeStyle []
-    todo("raster-nv.rasterstroke.solid")
+    RstStrokeStyle { width: width, join: RstRound, cap: RstButt, miter_limit: 4.0, dash: [],
+                     dash_offset: 0.0 }
 
 // A hairline: the thinnest stroke that draws at all.
 //
@@ -107,11 +109,12 @@ pub fn solid(width: Float) -> RstStrokeStyle []
 // that asks for the other reading — a stroke whose outline is built
 // after the transform, one pixel wide.
 pub fn hairline() -> RstStrokeStyle []
-    todo("raster-nv.rasterstroke.hairline")
+    RstStrokeStyle { width: -1.0, join: RstRound, cap: RstButt, miter_limit: 4.0, dash: [],
+                     dash_offset: 0.0 }
 
 // Whether a style is the hairline case.
 pub fn is_hairline(s: RstStrokeStyle) -> Bool []
-    todo("raster-nv.rasterstroke.is_hairline")
+    s.width < 0.0
 
 // The fill rule a stroke outline must be filled with: `GeomNonZero`.
 //
@@ -120,7 +123,7 @@ pub fn is_hairline(s: RstStrokeStyle) -> Bool []
 // overlap and then has holes in it — and the overlap is what a join
 // IS.
 pub fn fill_rule() -> GeomFillRule []
-    todo("raster-nv.rasterstroke.fill_rule")
+    GeomNonZero
 
 // ── Path to path ─────────────────────────────────────────────────────
 
@@ -143,7 +146,7 @@ pub fn fill_rule() -> GeomFillRule []
 // ```
 pub fn outline(path: svgpath.SvgPath,
                style: RstStrokeStyle) -> Result<svgpath.SvgPath, rastererror.RstFault> []
-    todo("raster-nv.rasterstroke.outline")
+    outline_at(path, s_or_unit(style), default_tolerance(style))
 
 // A path cut into the on-segments of a dash pattern.
 //
@@ -156,14 +159,21 @@ pub fn outline(path: svgpath.SvgPath,
 // loop that walks it would not terminate.
 pub fn dash(path: svgpath.SvgPath, pattern: [Float],
             offset: Float) -> Result<svgpath.SvgPath, rastererror.RstFault> []
-    todo("raster-nv.rasterstroke.dash")
+    dash_at(path, pattern, offset, dash_tolerance(pattern))
 
 // Whether a dash pattern can advance at all.
 //
 // The check `dash` makes, published so a caller validating a style
 // sheet can make it once rather than per path.
 pub fn dash_is_usable(pattern: [Float]) -> Bool []
-    todo("raster-nv.rasterstroke.dash_is_usable")
+    if list.is_empty(pattern)
+        return false
+    var sum = 0.0
+    for v in pattern
+        if v < 0.0 or math.is_nan(v) or math.is_inf(v)
+            return false
+        sum = sum + v
+    sum > 0.0
 
 // ── Measuring ────────────────────────────────────────────────────────
 
@@ -174,7 +184,20 @@ pub fn dash_is_usable(pattern: [Float]) -> Bool []
 // bounds inflated by half the width, and why a caller that assumed it
 // was would clip the points off its own star.
 pub fn stroked_bounds(path: svgpath.SvgPath, style: RstStrokeStyle) -> geomrect.GeomRectF []
-    todo("raster-nv.rasterstroke.stroked_bounds")
+    let width = unit_width(style)
+    if width <= 0.0
+        return geomrect.empty()
+    var pts: [GeomPointF] = []
+    var reach = 1.0
+    for run in flat_runs(path, default_tolerance(style))
+        for q in run.points
+            list.push(pts, q)
+        if style.join == RstMiter
+            reach = math.max(reach, sharpest_miter(run, style.miter_limit))
+    if style.cap == RstSquare
+        reach = math.max(reach, math.sqrt(2.0))
+    let h = width / 2.0 * reach
+    geomrect.inflate(geomrect.bounding(pts), h, h)
 
 // How far past a corner the miter reaches, as a multiple of half the
 // width.
@@ -183,11 +206,14 @@ pub fn stroked_bounds(path: svgpath.SvgPath, style: RstStrokeStyle) -> geomrect.
 // against, and a caller tuning a limit for a particular drawing wants
 // to see what its sharpest corner actually asks for.
 pub fn miter_extent(angle_radians: Float) -> Float []
-    todo("raster-nv.rasterstroke.miter_extent")
+    let s = math.sin(math.min(angle_radians, math.pi()) / 2.0)
+    if s <= 0.0
+        return math.infinity()
+    1.0 / s
 
 // Whether a corner at this angle would be bevelled under this limit.
 pub fn miter_becomes_bevel(angle_radians: Float, limit: Float) -> Bool []
-    todo("raster-nv.rasterstroke.miter_becomes_bevel")
+    miter_extent(angle_radians) > limit
 
 // Whether a point is inside the stroke.
 //
@@ -197,4 +223,338 @@ pub fn miter_becomes_bevel(angle_radians: Float, limit: Float) -> Bool []
 // with the caps and joins accounted for.
 pub fn stroke_contains(path: svgpath.SvgPath, style: RstStrokeStyle, at_x: Float,
                        at_y: Float) -> Bool []
-    todo("raster-nv.rasterstroke.stroke_contains")
+    match outline_at(path, s_or_unit(style), default_tolerance(style))
+        Err(_)    => false
+        Ok(ink)   => rasterfill.contains(ink, at_x, at_y, GeomNonZero, rasterfill.default_flatten())
+
+// ── The stroker ──────────────────────────────────────────────────────
+
+// How many pieces of dashes one call may cut a path into.
+fn dash_piece_limit() -> Int
+    4194304
+
+// A style whose hairline is one path unit wide, for the calls that know
+// no transform to measure a pixel by.
+fn s_or_unit(style: RstStrokeStyle) -> RstStrokeStyle
+    RstStrokeStyle { width: unit_width(style), join: style.join, cap: style.cap,
+                     miter_limit: style.miter_limit, dash: style.dash,
+                     dash_offset: style.dash_offset }
+
+fn unit_width(style: RstStrokeStyle) -> Float
+    if is_hairline(style)
+        return 1.0
+    style.width
+
+// The distance a flattened curve may stray from the true one, in path
+// units: a fiftieth of the line width, so the stroke is smooth at
+// whatever size it is drawn.
+fn default_tolerance(style: RstStrokeStyle) -> Float
+    math.max(unit_width(style) * 0.02, 0.000001)
+
+// A fiftieth of the smallest dash, for the same reason.
+fn dash_tolerance(pattern: [Float]) -> Float
+    var least = math.infinity()
+    for v in pattern
+        if v > 0.0
+            least = math.min(least, v)
+    if math.is_inf(least)
+        return 0.01
+    least * 0.02
+
+// The flattened subpaths of a path, as runs of points.
+fn flat_runs(path: svgpath.SvgPath, tol: Float) -> [svgpath.SvgSubpath]
+    let flat = rasterfill.flatten_path(path, geomxform.identity(),
+                                       RstFlatten { tolerance: tol, max_per_curve: 256 })
+    var runs: [svgpath.SvgSubpath] = []
+    var pts: [GeomPointF] = []
+    for c in svgpath.commands_of(flat)
+        match c
+            SvgMoveTo(x, y)  =>
+                if not list.is_empty(pts)
+                    list.push(runs, svgpath.SvgSubpath { points: pts, closed: false })
+                pts = [geompoint.ptf(x, y)]
+            SvgLineTo(x, y)  => list.push(pts, geompoint.ptf(x, y))
+            _                =>
+                list.push(runs, svgpath.SvgSubpath { points: pts, closed: true })
+                pts = []
+    if not list.is_empty(pts)
+        list.push(runs, svgpath.SvgSubpath { points: pts, closed: false })
+    runs
+
+fn same_spot(a: GeomPointF, b: GeomPointF) -> Bool
+    math.abs(a.x - b.x) <= 0.000000001 and math.abs(a.y - b.y) <= 0.000000001
+
+// The points with consecutive repeats removed, and a closed run's last
+// point removed when it is its first.
+fn distinct(pts: [GeomPointF], closed: Bool) -> [GeomPointF]
+    var out: [GeomPointF] = []
+    for q in pts
+        if list.is_empty(out) or not same_spot(out[list.len(out) - 1], q)
+            list.push(out, q)
+    if closed and list.len(out) > 1 and same_spot(out[0], out[list.len(out) - 1])
+        out = out[:list.len(out) - 1]
+    out
+
+fn unit_toward(a: GeomPointF, b: GeomPointF) -> GeomVecF
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let len = math.hypot(dx, dy)
+    geompoint.vecf(dx / len, dy / len)
+
+// The left-hand normal of a direction.
+fn left_of(d: GeomVecF) -> GeomVecF
+    geompoint.vecf(0.0 - d.dy, d.dx)
+
+fn moved(p: GeomPointF, n: GeomVecF, h: Float) -> GeomPointF
+    geompoint.ptf(p.x + n.dx * h, p.y + n.dy * h)
+
+// How many straight pieces an arc of `sweep` radians needs for the
+// tolerance, at least one.
+fn arc_pieces(sweep: Float, h: Float, tol: Float) -> Int
+    var step = math.pi() / 2.0
+    if tol < h
+        step = math.min(step, 2.0 * math.acos(1.0 - tol / h))
+    math.max(1, math.ceil(math.abs(sweep) / math.max(step, 0.01)) as Int)
+
+// Points on the arc of radius `h` about `c` from angle `a0` through
+// `sweep`, without the two ends.
+fn arc_between(var out: [GeomPointF], c: GeomPointF, h: Float, a0: Float, sweep: Float, tol: Float)
+    let n = arc_pieces(sweep, h, tol)
+    for k in 1..n
+        let a = a0 + sweep * k as Float / n as Float
+        list.push(out, geompoint.ptf(c.x + h * math.cos(a), c.y + h * math.sin(a)))
+
+// What one vertex adds to the left-hand side: the corner of the offset
+// curve between a segment heading `d0` and the next heading `d1`.
+//
+// On the inside of the turn the offset curve passes through the vertex
+// itself, which the non-zero fill covers; on the outside the join
+// decides.
+fn add_join(var out: [GeomPointF], p: GeomPointF, d0: GeomVecF, d1: GeomVecF, h: Float,
+            style: RstStrokeStyle, tol: Float)
+    let n0 = left_of(d0)
+    let n1 = left_of(d1)
+    let cross = d0.dx * d1.dy - d0.dy * d1.dx
+    let dot = d0.dx * d1.dx + d0.dy * d1.dy
+    let a = moved(p, n0, h)
+    let b = moved(p, n1, h)
+    if math.abs(cross) <= 0.000000000001 and dot > 0.0
+        list.push(out, a)
+        return
+    if cross > 0.0
+        list.push(out, a)
+        list.push(out, p)
+        list.push(out, b)
+        return
+    list.push(out, a)
+    match style.join
+        RstRound =>
+            var sweep = math.atan2(cross, dot)
+            if cross == 0.0
+                sweep = 0.0 - math.pi()
+            arc_between(var out, p, h, math.atan2(n0.dy, n0.dx), sweep, tol)
+        RstMiter =>
+            let half = math.sqrt((1.0 + n0.dx * n1.dx + n0.dy * n1.dy) / 2.0)
+            if half > 0.0 and 1.0 / half <= style.miter_limit
+                let k = h / (2.0 * half * half)
+                list.push(out, geompoint.ptf(p.x + (n0.dx + n1.dx) * k, p.y + (n0.dy + n1.dy) * k))
+        RstBevel => list.push(out, a)
+    list.push(out, b)
+
+// The left-hand offset of a run of distinct points: for an open run
+// from its first point's offset to its last point's, for a closed one
+// all the way round.
+fn left_side(pts: [GeomPointF], closed: Bool, h: Float, style: RstStrokeStyle,
+             tol: Float) -> [GeomPointF]
+    let n = list.len(pts)
+    var dirs: [GeomVecF] = []
+    for i in 0..n
+        if closed or i < n - 1
+            list.push(dirs, unit_toward(pts[i], pts[(i + 1) % n]))
+    var out: [GeomPointF] = []
+    if closed
+        for i in 0..n
+            add_join(var out, pts[i], dirs[(i + n - 1) % n], dirs[i], h, style, tol)
+        return out
+    list.push(out, moved(pts[0], left_of(dirs[0]), h))
+    for i in 1..n - 1
+        add_join(var out, pts[i], dirs[i - 1], dirs[i], h, style, tol)
+    list.push(out, moved(pts[n - 1], left_of(dirs[n - 2]), h))
+    out
+
+fn reversed_points(pts: [GeomPointF]) -> [GeomPointF]
+    var out: [GeomPointF] = []
+    for i in 0..list.len(pts)
+        list.push(out, pts[list.len(pts) - 1 - i])
+    out
+
+// The end of an open run, from the left offset round to the right one.
+fn add_cap(var out: [GeomPointF], p: GeomPointF, d: GeomVecF, h: Float, cap: RstCap, tol: Float)
+    let nl = left_of(d)
+    match cap
+        RstButt     => list.push(out, moved(p, nl, h))
+        RstSquare   =>
+            list.push(out, geompoint.ptf(p.x + nl.dx * h + d.dx * h, p.y + nl.dy * h + d.dy * h))
+            list.push(out, geompoint.ptf(p.x - nl.dx * h + d.dx * h, p.y - nl.dy * h + d.dy * h))
+        RstRoundCap =>
+            list.push(out, moved(p, nl, h))
+            arc_between(var out, p, h, math.atan2(nl.dy, nl.dx), 0.0 - math.pi(), tol)
+
+fn emit_contour(var cmds: [SvgPathCmd], pts: [GeomPointF])
+    var first = true
+    for q in pts
+        if first
+            list.push(cmds, SvgMoveTo(q.x, q.y))
+            first = false
+        else
+            list.push(cmds, SvgLineTo(q.x, q.y))
+    list.push(cmds, SvgClosePath)
+
+// The mark a subpath of one point leaves: a disc for a round cap, a
+// square for a square one, nothing for a butt.
+fn dot_of(p: GeomPointF, h: Float, cap: RstCap, tol: Float) -> [GeomPointF]
+    var out: [GeomPointF] = []
+    match cap
+        RstButt     => out
+        RstSquare   =>
+            list.push(out, geompoint.ptf(p.x - h, p.y - h))
+            list.push(out, geompoint.ptf(p.x + h, p.y - h))
+            list.push(out, geompoint.ptf(p.x + h, p.y + h))
+            list.push(out, geompoint.ptf(p.x - h, p.y + h))
+            out
+        RstRoundCap =>
+            list.push(out, geompoint.ptf(p.x + h, p.y))
+            arc_between(var out, p, h, 0.0, 2.0 * math.pi(), tol)
+            out
+
+// The outline of one subpath, appended as closed contours.
+fn stroke_run(var cmds: [SvgPathCmd], run: svgpath.SvgSubpath, h: Float, style: RstStrokeStyle,
+              tol: Float)
+    let pts = distinct(run.points, run.closed)
+    let n = list.len(pts)
+    if n == 1
+        let disc = dot_of(pts[0], h, style.cap, tol)
+        if not list.is_empty(disc)
+            emit_contour(var cmds, disc)
+        return
+    if run.closed
+        emit_contour(var cmds, left_side(pts, true, h, style, tol))
+        emit_contour(var cmds, left_side(reversed_points(pts), true, h, style, tol))
+        return
+    var ring = left_side(pts, false, h, style, tol)
+    add_cap(var ring, pts[n - 1], unit_toward(pts[n - 2], pts[n - 1]), h, style.cap, tol)
+    for q in left_side(reversed_points(pts), false, h, style, tol)
+        list.push(ring, q)
+    add_cap(var ring, pts[0], unit_toward(pts[1], pts[0]), h, style.cap, tol)
+    emit_contour(var cmds, ring)
+
+fn outline_at(path: svgpath.SvgPath, style: RstStrokeStyle,
+              tol: Float) -> Result<svgpath.SvgPath, rastererror.RstFault>
+    var src = path
+    if not list.is_empty(style.dash)
+        src = match dash_at(path, style.dash, style.dash_offset, tol)
+            Err(e) => return Err(e)
+            Ok(d)  => d
+    var cmds: [SvgPathCmd] = []
+    if style.width != 0.0
+        for run in flat_runs(src, tol)
+            stroke_run(var cmds, run, unit_width(style) / 2.0, style, tol)
+    Ok(svgpath.of_commands(cmds))
+
+// The largest multiple of the half width a miter reaches at any vertex
+// of the run, counting only the corners that stay mitred.
+fn sharpest_miter(run: svgpath.SvgSubpath, limit: Float) -> Float
+    let pts = distinct(run.points, run.closed)
+    let n = list.len(pts)
+    var reach = 1.0
+    for i in 0..n
+        if run.closed or (i > 0 and i < n - 1)
+            let d0 = unit_toward(pts[(i + n - 1) % n], pts[i])
+            let d1 = unit_toward(pts[i], pts[(i + 1) % n])
+            let turn = math.acos(math.clamp(d0.dx * d1.dx + d0.dy * d1.dy, -1.0, 1.0))
+            let extent = miter_extent(math.pi() - turn)
+            if extent <= limit
+                reach = math.max(reach, extent)
+    reach
+
+// ── Dashing ──────────────────────────────────────────────────────────
+
+fn dash_elements(pattern: [Float]) -> [Float]
+    var out = list.clone(pattern)
+    if list.len(pattern) % 2 == 1
+        for v in pattern
+            list.push(out, v)
+    out
+
+fn dash_at(path: svgpath.SvgPath, pattern: [Float], offset: Float,
+           tol: Float) -> Result<svgpath.SvgPath, rastererror.RstFault>
+    if not dash_is_usable(pattern)
+        return Err(RstBadDash)
+    let pat = dash_elements(pattern)
+    var cycle = 0.0
+    for v in pat
+        cycle = cycle + v
+    let runs = flat_runs(path, tol)
+    var length = 0.0
+    for run in runs
+        length = length + run_length(run)
+    if length / cycle * list.len(pat) as Float > dash_piece_limit() as Float
+        return Err(RstBadDash)
+    var cmds: [SvgPathCmd] = []
+    for run in runs
+        dash_run(var cmds, run, pat, cycle, offset)
+    Ok(svgpath.of_commands(cmds))
+
+fn run_length(run: svgpath.SvgSubpath) -> Float
+    let n = list.len(run.points)
+    var total = 0.0
+    for i in 0..n
+        if run.closed or i < n - 1
+            let a = run.points[i]
+            let b = run.points[(i + 1) % n]
+            total = total + math.hypot(b.x - a.x, b.y - a.y)
+    total
+
+fn emit_dash(var cmds: [SvgPathCmd], cur: [GeomPointF])
+    list.push(cmds, SvgMoveTo(cur[0].x, cur[0].y))
+    if list.len(cur) == 1
+        list.push(cmds, SvgLineTo(cur[0].x, cur[0].y))
+    for i in 1..list.len(cur)
+        list.push(cmds, SvgLineTo(cur[i].x, cur[i].y))
+
+// One subpath cut into its on-segments, the pattern starting `offset`
+// into its first cycle.
+fn dash_run(var cmds: [SvgPathCmd], run: svgpath.SvgSubpath, pat: [Float], cycle: Float,
+            offset: Float)
+    var skip = offset - cycle * math.floor(offset / cycle)
+    var idx = 0
+    while skip > pat[idx]
+        skip = skip - pat[idx]
+        idx = (idx + 1) % list.len(pat)
+    var remain = pat[idx] - skip
+    var cur: [GeomPointF] = []
+    if idx % 2 == 0
+        cur = [run.points[0]]
+    let n = list.len(run.points)
+    for i in 0..n
+        if run.closed or i < n - 1
+            let a = run.points[i]
+            let b = run.points[(i + 1) % n]
+            let seg = math.hypot(b.x - a.x, b.y - a.y)
+            var at = 0.0
+            while seg - at > remain
+                at = at + remain
+                let q = geompoint.ptf(a.x + (b.x - a.x) * at / seg, a.y + (b.y - a.y) * at / seg)
+                if idx % 2 == 0
+                    list.push(cur, q)
+                    emit_dash(var cmds, cur)
+                    cur = []
+                else
+                    cur = [q]
+                idx = (idx + 1) % list.len(pat)
+                remain = pat[idx]
+            remain = remain - (seg - at)
+            if idx % 2 == 0
+                list.push(cur, b)
+    if idx % 2 == 0 and not list.is_empty(cur)
+        emit_dash(var cmds, cur)

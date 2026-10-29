@@ -1,8 +1,6 @@
 // rasterfill.nv — the sweep: a path in, a coverage mask out, with the
 // anti-aliasing computed rather than sampled.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // ANALYTIC, WHICH IS A CLAIM WITH A TEST BEHIND IT.  There are two
 // ways to anti-alias a filled path.  Supersampling asks "is the shape
 // here?" at sixteen points in the pixel and counts the yeses, which
@@ -58,7 +56,7 @@ struct RstFlatten
 
 // The usual flattening: a quarter of a pixel, 256 segments a curve.
 pub fn default_flatten() -> RstFlatten []
-    todo("raster-nv.rasterfill.default_flatten")
+    RstFlatten { tolerance: 0.25, max_per_curve: 256 }
 
 // Whether this package promises exact area coverage rather than
 // supersampled coverage.
@@ -68,7 +66,7 @@ pub fn default_flatten() -> RstFlatten []
 // rasterisers is choosing on exactly this, and a README sentence is
 // not something a test can read.
 pub fn exact_coverage_is_claimed() -> Bool []
-    todo("raster-nv.rasterfill.exact_coverage_is_claimed")
+    true
 
 // ── Filling ──────────────────────────────────────────────────────────
 
@@ -97,7 +95,7 @@ pub fn exact_coverage_is_claimed() -> Bool []
 pub fn fill(path: svgpath.SvgPath, xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
             rule: GeomFillRule, flatten: RstFlatten,
             limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
-    todo("raster-nv.rasterfill.fill")
+    fill_set([path], xform, clip, rule, flatten, limits)
 
 // Rasterise several paths into ONE mask, as if they were one path.
 //
@@ -109,7 +107,7 @@ pub fn fill(path: svgpath.SvgPath, xform: geomxform.GeomXform, clip: geomrect.Ge
 pub fn fill_all(paths: [svgpath.SvgPath], xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
                 rule: GeomFillRule, flatten: RstFlatten,
                 limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
-    todo("raster-nv.rasterfill.fill_all")
+    fill_set(paths, xform, clip, rule, flatten, limits)
 
 // Rasterise an axis-aligned rectangle, which needs no sweep at all.
 //
@@ -120,7 +118,22 @@ pub fn fill_all(paths: [svgpath.SvgPath], xform: geomxform.GeomXform, clip: geom
 // suite asserts.
 pub fn fill_rect(r: geomrect.GeomRectF, clip: geomrect.GeomRectI,
                  limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
-    todo("raster-nv.rasterfill.fill_rect")
+    let r = geomrect.normalize(r)
+    let box = box_for(r, clip)
+    let m = match rastermask.mask(math.max(geomrect.width_i(box), 1), math.max(geomrect.height_i(box), 1),
+                                  box.min.x, box.min.y, limits)
+        Err(e) => return Err(e)
+        Ok(built) => built
+    if geomrect.is_empty_i(box)
+        return Ok(m)
+    var buf = bytes.clone(m.coverage)
+    for y in 0..m.height
+        let cy = span_coverage(r.min.y, r.max.y, box.min.y + y)
+        for x in 0..m.width
+            let cx = span_coverage(r.min.x, r.max.x, box.min.x + x)
+            bytes.set_u8(buf, y * m.width + x, to_byte(cx * cy))
+    Ok(RstMask { width: m.width, height: m.height, origin_x: m.origin_x, origin_y: m.origin_y,
+                 coverage: buf })
 
 // Rasterise a convex polygon, which needs no winding accumulation.
 //
@@ -130,7 +143,8 @@ pub fn fill_rect(r: geomrect.GeomRectF, clip: geomrect.GeomRectI,
 // check a caller makes to decide.
 pub fn fill_convex(p: geompoly.GeomPoly, xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
                    limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
-    todo("raster-nv.rasterfill.fill_convex")
+    fill_set([svgpath.of_points(geompoly.points_of(p), true)], xform, clip, GeomNonZero,
+             default_flatten(), limits)
 
 // ── Measuring before filling ─────────────────────────────────────────
 
@@ -141,7 +155,7 @@ pub fn fill_convex(p: geompoly.GeomPoly, xform: geomxform.GeomXform, clip: geomr
 // own extrema, with no flattening.
 pub fn pixel_bounds(path: svgpath.SvgPath, xform: geomxform.GeomXform,
                     clip: geomrect.GeomRectI) -> geomrect.GeomRectI []
-    todo("raster-nv.rasterfill.pixel_bounds")
+    box_for(float_bounds([path], xform), clip)
 
 // How many segments flattening this path at this transform would
 // produce.
@@ -149,7 +163,7 @@ pub fn pixel_bounds(path: svgpath.SvgPath, xform: geomxform.GeomXform,
 // For a caller sizing `RstLimits.max_edges`, and for a report that
 // wants to say which path in a document is the expensive one.
 pub fn edge_count(path: svgpath.SvgPath, xform: geomxform.GeomXform, flatten: RstFlatten) -> Int []
-    todo("raster-nv.rasterfill.edge_count")
+    count_edges(polylines(path, xform, flatten))
 
 // The flattened path: every curve replaced by line segments.
 //
@@ -159,7 +173,18 @@ pub fn edge_count(path: svgpath.SvgPath, xform: geomxform.GeomXform, flatten: Rs
 // with a different tolerance.
 pub fn flatten_path(path: svgpath.SvgPath, xform: geomxform.GeomXform,
                     flatten: RstFlatten) -> svgpath.SvgPath []
-    todo("raster-nv.rasterfill.flatten_path")
+    var cmds: [SvgPathCmd] = []
+    for run in polylines(path, xform, flatten)
+        var first = true
+        for q in run.points
+            if first
+                list.push(cmds, SvgMoveTo(q.x, q.y))
+                first = false
+            else
+                list.push(cmds, SvgLineTo(q.x, q.y))
+        if run.closed
+            list.push(cmds, SvgClosePath)
+    svgpath.of_commands(cmds)
 
 // ── Hit testing ──────────────────────────────────────────────────────
 
@@ -172,7 +197,10 @@ pub fn flatten_path(path: svgpath.SvgPath, xform: geomxform.GeomXform,
 // pixel-flavoured coordinate space.
 pub fn contains(path: svgpath.SvgPath, at_x: Float, at_y: Float, rule: GeomFillRule,
                 flatten: RstFlatten) -> Bool []
-    todo("raster-nv.rasterfill.contains")
+    let wn = winding_at(path, at_x, at_y, flatten)
+    match rule
+        GeomNonZero => wn != 0
+        GeomEvenOdd => wn % 2 != 0
 
 // The winding number at a point, which `contains` reads through the
 // rule.
@@ -181,4 +209,300 @@ pub fn contains(path: svgpath.SvgPath, at_x: Float, at_y: Float, rule: GeomFillR
 // positive-winding fill, which some CAD formats use — needs the number
 // and not the boolean.
 pub fn winding_at(path: svgpath.SvgPath, at_x: Float, at_y: Float, flatten: RstFlatten) -> Int []
-    todo("raster-nv.rasterfill.winding_at")
+    var wn = 0
+    for run in polylines(path, geomxform.identity(), flatten)
+        let n = list.len(run.points)
+        for i in 0..n
+            let a = run.points[i]
+            let b = run.points[(i + 1) % n]
+            if a.y <= at_y
+                if b.y > at_y and side(a, b, at_x, at_y) > 0.0
+                    wn = wn + 1
+            elif b.y <= at_y and side(a, b, at_x, at_y) < 0.0
+                wn = wn - 1
+    wn
+
+// ── The sweep ────────────────────────────────────────────────────────
+
+// Coordinates are held to this magnitude so that a path from a file
+// cannot turn into an overflowing integer.
+fn coordinate_limit() -> Float
+    1000000000.0
+
+// A coordinate the sweep can use: a number that is not NaN, inside
+// the limit.
+fn finite(v: Float) -> Float
+    if math.is_nan(v)
+        return 0.0
+    math.clamp(v, 0.0 - coordinate_limit(), coordinate_limit())
+
+fn pixel_point(x: Float, y: Float) -> GeomPointF
+    geompoint.ptf(finite(x), finite(y))
+
+// The signed area of the triangle `a`, `b`, `(px, py)`: positive when
+// the point is on the left of the edge.
+fn side(a: GeomPointF, b: GeomPointF, px: Float, py: Float) -> Float
+    (b.x - a.x) * (py - a.y) - (px - a.x) * (b.y - a.y)
+
+// The curve's points after its start, at most `cap` of them, spread
+// evenly and ending on the curve's end.
+fn thinned(points: [GeomPointF], cap: Int) -> [GeomPointF]
+    let n = list.len(points) - 1
+    var out: [GeomPointF] = []
+    if n <= cap or cap < 1
+        for i in 1..n + 1
+            list.push(out, points[i])
+        return out
+    for j in 1..cap + 1
+        list.push(out, points[j * n / cap])
+    out
+
+// The points one curve command adds after `from`, in pixel space.
+fn curve_points(from: GeomPointF, c: SvgPathCmd, flatten: RstFlatten) -> [GeomPointF]
+    let one = svgpath.of_commands([SvgMoveTo(from.x, from.y), c])
+    let runs = svgpath.flatten(one, flatten.tolerance)
+    var pts: [GeomPointF] = []
+    for q in thinned(runs[0].points, flatten.max_per_curve)
+        list.push(pts, pixel_point(q.x, q.y))
+    pts
+
+// The path through the transform, every curve cut into straight
+// segments to within the tolerance, one run per subpath.
+//
+// A command before the first move draws nothing, and a command after a
+// close starts a new run where the closed one began.  A subpath of one
+// point is a run when it is closed.
+fn polylines(path: svgpath.SvgPath, xform: geomxform.GeomXform,
+             flatten: RstFlatten) -> [svgpath.SvgSubpath]
+    var runs: [svgpath.SvgSubpath] = []
+    var pts: [GeomPointF] = []
+    var begun = false
+    var live = false
+    var cur = pixel_point(0.0, 0.0)
+    var start = cur
+    for c in svgpath.commands_of(svgpath.transform(path, xform))
+        match c
+            SvgMoveTo(x, y)         =>
+                if list.len(pts) > 1
+                    list.push(runs, svgpath.SvgSubpath { points: pts, closed: false })
+                cur = pixel_point(x, y)
+                start = cur
+                pts = [cur]
+                begun = true
+                live = true
+            SvgClosePath            =>
+                if live
+                    list.push(runs, svgpath.SvgSubpath { points: pts, closed: true })
+                cur = start
+                pts = [cur]
+                live = false
+            SvgLineTo(x, y)         =>
+                if begun
+                    cur = pixel_point(x, y)
+                    list.push(pts, cur)
+                    live = true
+            _                       =>
+                if begun
+                    let more = curve_points(cur, c, flatten)
+                    for q in more
+                        list.push(pts, q)
+                    cur = more[list.len(more) - 1]
+                    live = true
+    if list.len(pts) > 1
+        list.push(runs, svgpath.SvgSubpath { points: pts, closed: false })
+    runs
+
+// The segments a fill would sweep: every run's own segments and the one
+// that closes it.
+fn count_edges(runs: [svgpath.SvgSubpath]) -> Int
+    var n = 0
+    for run in runs
+        n = n + list.len(run.points)
+    n
+
+// The bounds of every path through the transform, as floats.
+fn float_bounds(paths: [svgpath.SvgPath], xform: geomxform.GeomXform) -> geomrect.GeomRectF
+    var r = geomrect.empty()
+    for p in paths
+        let b = svgpath.bounds(svgpath.transform(p, xform))
+        if not geomrect.is_empty(b)
+            r = geomrect.union(r, b)
+    r
+
+// The pixels a float rectangle reaches, rounded outward and held
+// inside the clip.
+fn box_for(r: geomrect.GeomRectF, clip: geomrect.GeomRectI) -> geomrect.GeomRectI
+    if geomrect.is_empty(r)
+        return geomrect.empty_i()
+    let lo = geompoint.ptf(finite(r.min.x), finite(r.min.y))
+    let hi = geompoint.ptf(finite(r.max.x), finite(r.max.y))
+    let box = geomrect.intersection_i(geomrect.to_int_outer(geomrect.of_corners(lo, hi)), clip)
+    if geomrect.is_empty_i(box)
+        return geomrect.empty_i()
+    box
+
+// How much of the pixel column or row `i` the span `lo` to `hi` covers.
+fn span_coverage(lo: Float, hi: Float, i: Int) -> Float
+    math.max(0.0, math.min(hi, (i + 1) as Float) - math.max(lo, i as Float))
+
+fn to_byte(v: Float) -> Int
+    math.min(255, math.max(0, (v * 255.0 + 0.5) as Int))
+
+// The sweep for a set of paths filled as one.
+fn fill_set(paths: [svgpath.SvgPath], xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
+            rule: GeomFillRule, flatten: RstFlatten,
+            limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault>
+    if not geomxform.is_invertible(xform)
+        return Err(RstSingularTransform)
+    let box = box_for(float_bounds(paths, xform), clip)
+    let m = match rastermask.mask(math.max(geomrect.width_i(box), 1), math.max(geomrect.height_i(box), 1),
+                                  if geomrect.is_empty_i(box) then clip.min.x else box.min.x,
+                                  if geomrect.is_empty_i(box) then clip.min.y else box.min.y, limits)
+        Err(e)    => return Err(e)
+        Ok(built) => built
+    if geomrect.is_empty_i(box)
+        return Ok(m)
+    var runs: [svgpath.SvgSubpath] = []
+    for p in paths
+        list.append(runs, polylines(p, xform, flatten))
+    let edges = count_edges(runs)
+    if edges > limits.max_edges
+        return Err(RstTooLarge(edges, limits.max_edges))
+    let stride = m.width + 2
+    var acc: [Float] = []
+    for _ in 0..stride * m.height
+        list.push(acc, 0.0)
+    for run in runs
+        let n = list.len(run.points)
+        for i in 0..n
+            let a = run.points[i]
+            let b = run.points[(i + 1) % n]
+            add_edge(var acc, stride, m.width, m.height, a.x - m.origin_x as Float,
+                     a.y - m.origin_y as Float, b.x - m.origin_x as Float, b.y - m.origin_y as Float)
+    Ok(RstMask { width: m.width, height: m.height, origin_x: m.origin_x, origin_y: m.origin_y,
+                 coverage: coverage_of(acc, stride, m.width, m.height, rule) })
+
+// One segment added to the area table, cut where it crosses the left
+// and the right side of the mask so that the part outside still
+// contributes its winding.
+fn add_edge(var acc: [Float], stride: Int, w: Int, h: Int, x0: Float, y0: Float, x1: Float,
+            y1: Float)
+    let right = w as Float
+    if x0 >= right and x1 >= right
+        return
+    if x0 <= 0.0 and x1 <= 0.0
+        add_piece(var acc, stride, h, 0.0, y0, 0.0, y1)
+        return
+    if x0 >= 0.0 and x0 <= right and x1 >= 0.0 and x1 <= right
+        add_piece(var acc, stride, h, x0, y0, x1, y1)
+        return
+    var cuts: [Float] = [0.0, 1.0]
+    for edge in [0.0, right]
+        if (x0 < edge) != (x1 < edge)
+            list.push(cuts, (edge - x0) / (x1 - x0))
+    list.sort(cuts)
+    for k in 0..list.len(cuts) - 1
+        let xa = x0 + (x1 - x0) * cuts[k]
+        let ya = y0 + (y1 - y0) * cuts[k]
+        let xb = x0 + (x1 - x0) * cuts[k + 1]
+        let yb = y0 + (y1 - y0) * cuts[k + 1]
+        add_edge_inside(var acc, stride, w, h, xa, ya, xb, yb)
+
+// A piece that lies wholly on one side of both cuts, or inside them.
+fn add_edge_inside(var acc: [Float], stride: Int, w: Int, h: Int, xa: Float, ya: Float, xb: Float,
+                   yb: Float)
+    let right = w as Float
+    let mid = (xa + xb) / 2.0
+    if mid >= right
+        return
+    add_piece(var acc, stride, h, math.clamp(xa, 0.0, right), ya, math.clamp(xb, 0.0, right), yb)
+
+// The signed area one straight piece cuts out of each pixel it crosses,
+// added to the cells of the rows it passes through.  The piece lies
+// inside `0 ..= w` across; rows outside `0 ..< h` are dropped.
+fn add_piece(var acc: [Float], stride: Int, h: Int, ax: Float, ay: Float, bx: Float, by: Float)
+    if ay == by
+        return
+    var dir = 1.0
+    var x0 = ax
+    var y0 = ay
+    var x1 = bx
+    var y1 = by
+    if ay > by
+        dir = -1.0
+        x0 = bx
+        y0 = by
+        x1 = ax
+        y1 = ay
+    if y1 <= 0.0 or y0 >= h as Float
+        return
+    let dxdy = (x1 - x0) / (y1 - y0)
+    var x = x0
+    var first = 0
+    if y0 < 0.0
+        x = x0 - y0 * dxdy
+    else
+        first = y0 as Int
+    let last = math.min(h, math.ceil(y1) as Int)
+    let right = (stride - 2) as Float
+    for y in first..last
+        let dy = math.min((y + 1) as Float, y1) - math.max(y as Float, y0)
+        let xnext = math.clamp(x + dxdy * dy, 0.0, right)
+        add_row(var acc, y * stride, x, xnext, dy * dir)
+        x = xnext
+
+// The area of one piece inside one row: `d` is the piece's height
+// there, signed by its direction, and it runs from `x` to `xnext`.
+fn add_row(var acc: [Float], line: Int, x: Float, xnext: Float, d: Float)
+    let xa = math.min(x, xnext)
+    let xb = math.max(x, xnext)
+    let xa_floor = math.floor(xa)
+    let ia = xa_floor as Int
+    let xb_ceil = math.ceil(xb)
+    let ib = xb_ceil as Int
+    if ib <= ia + 1
+        let mean = 0.5 * (x + xnext) - xa_floor
+        acc[line + ia] = acc[line + ia] + d - d * mean
+        acc[line + ia + 1] = acc[line + ia + 1] + d * mean
+        return
+    let s = 1.0 / (xb - xa)
+    let fa = xa - xa_floor
+    let area_a = 0.5 * s * (1.0 - fa) * (1.0 - fa)
+    let fb = xb - xb_ceil + 1.0
+    let area_b = 0.5 * s * fb * fb
+    acc[line + ia] = acc[line + ia] + d * area_a
+    if ib == ia + 2
+        acc[line + ia + 1] = acc[line + ia + 1] + d * (1.0 - area_a - area_b)
+    else
+        let a1 = s * (1.5 - fa)
+        acc[line + ia + 1] = acc[line + ia + 1] + d * (a1 - area_a)
+        for xi in ia + 2..ib - 1
+            acc[line + xi] = acc[line + xi] + d * s
+        let a2 = a1 + (ib - ia - 3) as Float * s
+        acc[line + ib - 1] = acc[line + ib - 1] + d * (1.0 - a2 - area_b)
+    acc[line + ib] = acc[line + ib] + d * area_b
+
+// The running sum of the area table, turned into coverage bytes under
+// the fill rule.
+fn coverage_of(acc: [Float], stride: Int, w: Int, h: Int, rule: GeomFillRule) -> Bytes
+    var out = bytes.zeros(w * h)
+    for y in 0..h
+        var running = 0.0
+        for x in 0..w
+            running = running + acc[y * stride + x]
+            let v = to_byte(folded(math.abs(running), rule))
+            if v != 0
+                bytes.set_u8(out, y * w + x, v)
+    out
+
+// A winding magnitude as a fraction of the pixel: clamped for non-zero,
+// folded back at every whole number for even-odd.
+fn folded(v: Float, rule: GeomFillRule) -> Float
+    match rule
+        GeomNonZero => math.min(v, 1.0)
+        GeomEvenOdd =>
+            let t = v - 2.0 * math.floor(v / 2.0)
+            if t > 1.0
+                2.0 - t
+            else
+                t

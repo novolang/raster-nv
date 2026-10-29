@@ -17,3 +17,6 @@ APIDOC.md
 # consumers — a consumer resolves its own — so the lock is a local
 # build artefact rather than a fact about the release.
 novo.lock
+
+# Python bytecode from the oracle scripts.
+__pycache__/

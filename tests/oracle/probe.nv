@@ -1,0 +1,79 @@
+// probe.nv - read scenarios written by compare.py, run them through this
+// package, and print the answers in the format compare.py reads back.
+//
+// usage: probe MODE SCENARIO_FILE
+//
+// Run through tests/oracle/compare.sh.
+
+use std.env
+use std.fs
+use std.list
+use std.str
+use std.bytes
+use geompoint
+use geomrect
+use geomxform
+use svgpath
+use rastermask
+use rasterfill
+use rasterstroke
+
+fn num(s: Str) -> Float
+    str.to_float(s) ?? 0.0
+
+fn whole(s: Str) -> Int
+    str.to_int(s) ?? 0
+
+// A path from tokens: M x y, L x y, Q x1 y1 x y, C x1 y1 x2 y2 x y, Z.
+fn path_of(t: [Str], from: Int) -> svgpath.SvgPath
+    var p = svgpath.empty()
+    var i = from
+    while i < list.len(t)
+        let k = t[i]
+        if k == "M"
+            p = svgpath.move_to(p, num(t[i + 1]), num(t[i + 2]))
+            i = i + 3
+        elif k == "L"
+            p = svgpath.line_to(p, num(t[i + 1]), num(t[i + 2]))
+            i = i + 3
+        elif k == "Q"
+            p = svgpath.quad_to(p, num(t[i + 1]), num(t[i + 2]), num(t[i + 3]), num(t[i + 4]))
+            i = i + 5
+        elif k == "C"
+            p = svgpath.cubic_to(p, num(t[i + 1]), num(t[i + 2]), num(t[i + 3]), num(t[i + 4]),
+                                 num(t[i + 5]), num(t[i + 6]))
+            i = i + 7
+        else
+            p = svgpath.close(p)
+            i = i + 1
+    p
+
+fn print_mask(m: RstMask, w: Int, h: Int)
+    for y in 0..h
+        var row = ""
+        for x in 0..w
+            row = row + "${rastermask.at(m, x, y)} "
+        println(row)
+
+fn run_fill(t: [Str])
+    // name W H rule tolerance commands...
+    let w = whole(t[1])
+    let h = whole(t[2])
+    var rule = GeomNonZero
+    if t[3] == "eo"
+        rule = GeomEvenOdd
+    let flat = RstFlatten { tolerance: num(t[4]), max_per_curve: 4096 }
+    println("== ${t[0]}")
+    match rasterfill.fill(path_of(t, 5), geomxform.identity(), geomrect.of_xywh_i(0, 0, w, h), rule,
+                          flat, rastermask.default_limits())
+        Ok(m)  => print_mask(m, w, h)
+        Err(e) => println("error")
+
+fn main() [io, fs]
+    let args = env.user_args()
+    let text = fs.read(args[1]) ?? ""
+    for line in str.lines(text)
+        let t = str.split(str.trim(line), " ")
+        if list.len(t) > 4
+            if args[0] == "fill"
+                run_fill(t)

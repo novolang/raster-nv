@@ -1,8 +1,6 @@
 // rastermask.nv — the value this package is built around: coverage,
 // eight bits a pixel, with no colour in it.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THIS MODULE IS THE LOAD-BEARING INTERFACE OF THE PACKAGE.
 //
 // A rasteriser's real output is not pixels.  It is the answer to one
@@ -97,7 +95,7 @@ struct RstLimits
 // and two callers inventing different numbers is two programs that
 // refuse different files.
 pub fn default_limits() -> RstLimits []
-    todo("raster-nv.rastermask.default_limits")
+    RstLimits { max_pixels: 67108864, max_edges: 1048576 }
 
 // A mask of `width` by `height` at an origin, fully transparent.
 //
@@ -105,7 +103,7 @@ pub fn default_limits() -> RstLimits []
 // every mask-producing call in this package makes first.
 pub fn mask(width: Int, height: Int, origin_x: Int, origin_y: Int,
             limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
-    todo("raster-nv.rastermask.mask")
+    build(width, height, origin_x, origin_y, 0, limits)
 
 // A mask covering a rectangle of the target, fully opaque.
 //
@@ -113,7 +111,7 @@ pub fn mask(width: Int, height: Int, origin_x: Int, origin_y: Int,
 // this once and intersects into it.
 pub fn full(width: Int, height: Int, origin_x: Int, origin_y: Int,
             limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
-    todo("raster-nv.rastermask.full")
+    build(width, height, origin_x, origin_y, 255, limits)
 
 // The integer rectangle a float bounding box needs, clipped to a
 // target of `w` by `h`.
@@ -124,7 +122,11 @@ pub fn full(width: Int, height: Int, origin_x: Int, origin_y: Int,
 // clip the edge of every shape by one pixel in a way that only shows
 // against a background.
 pub fn extent_for(bounds: geomrect.GeomRectF, w: Int, h: Int) -> geomrect.GeomRectI []
-    todo("raster-nv.rastermask.extent_for")
+    let outer = geomrect.to_int_outer(bounds)
+    let box = geomrect.intersection_i(outer, geomrect.of_xywh_i(0, 0, w, h))
+    if geomrect.is_empty_i(box)
+        return geomrect.empty_i()
+    box
 
 // How many pixels a mask over that rectangle would cost.
 //
@@ -132,7 +134,9 @@ pub fn extent_for(bounds: geomrect.GeomRectF, w: Int, h: Int) -> geomrect.GeomRe
 // renderer can decide how many tiles it needs without provoking a
 // refusal.
 pub fn cost_of(extent: geomrect.GeomRectI) -> Int []
-    todo("raster-nv.rastermask.cost_of")
+    if geomrect.is_empty_i(extent)
+        return 0
+    pixels_of(geomrect.width_i(extent), geomrect.height_i(extent))
 
 // ── Reading a mask ───────────────────────────────────────────────────
 
@@ -142,18 +146,24 @@ pub fn cost_of(extent: geomrect.GeomRectI) -> Int []
 // what a compositor and a hit test both have, and converting at every
 // call site is where the origin gets forgotten.
 pub fn at(m: RstMask, x: Int, y: Int) -> Int []
-    todo("raster-nv.rastermask.at")
+    let lx = x - m.origin_x
+    let ly = y - m.origin_y
+    if lx < 0 or ly < 0 or lx >= m.width or ly >= m.height
+        return 0
+    bytes.byte_at(m.coverage, ly * m.width + lx) ?? 0
 
 // The mask's rectangle in target coordinates.
 pub fn extent(m: RstMask) -> geomrect.GeomRectI []
-    todo("raster-nv.rastermask.extent")
+    geomrect.of_xywh_i(m.origin_x, m.origin_y, m.width, m.height)
 
 // One row's coverage bytes, or nothing when `y` is outside.
 //
 // In mask coordinates, because a caller walking rows is walking the
 // mask.  For a compositor that wants the run rather than the pixels.
 pub fn row(m: RstMask, y: Int) -> ?Bytes []
-    todo("raster-nv.rastermask.row")
+    if y < 0 or y >= m.height
+        return None
+    Some(bytes.slice(m.coverage, y * m.width, (y + 1) * m.width))
 
 // Whether two masks cover the same rectangle.
 //
@@ -161,7 +171,8 @@ pub fn row(m: RstMask, y: Int) -> ?Bytes []
 // because a caller that combines masks in a loop would rather ask once
 // than handle `RstExtentMismatch` three times.
 pub fn same_extent(a: RstMask, b: RstMask) -> Bool []
-    todo("raster-nv.rastermask.same_extent")
+    a.width == b.width and a.height == b.height and a.origin_x == b.origin_x
+        and a.origin_y == b.origin_y
 
 // Whether every byte is zero.
 //
@@ -169,14 +180,14 @@ pub fn same_extent(a: RstMask, b: RstMask) -> Bool []
 // produces an empty mask, and drawing it is a no-op that should cost
 // nothing.
 pub fn is_empty(m: RstMask) -> Bool []
-    todo("raster-nv.rastermask.is_empty")
+    all_equal(m, 0)
 
 // Whether every byte is 255.
 //
 // The other early exit: a fully covered mask means the compositor can
 // write the source straight in with no per-pixel blend.
 pub fn is_opaque(m: RstMask) -> Bool []
-    todo("raster-nv.rastermask.is_opaque")
+    all_equal(m, 255)
 
 // The smallest rectangle outside which every byte is zero.
 //
@@ -184,7 +195,20 @@ pub fn is_opaque(m: RstMask) -> Bool []
 // trim it before caching — a glyph cache does exactly that, because
 // the path bounds of an `e` are looser than its ink.
 pub fn ink_extent(m: RstMask) -> geomrect.GeomRectI []
-    todo("raster-nv.rastermask.ink_extent")
+    var x0 = m.width
+    var y0 = m.height
+    var x1 = -1
+    var y1 = -1
+    for y in 0..m.height
+        for x in 0..m.width
+            if (bytes.byte_at(m.coverage, y * m.width + x) ?? 0) != 0
+                x0 = math.min(x0, x)
+                x1 = math.max(x1, x)
+                y0 = math.min(y0, y)
+                y1 = math.max(y1, y)
+    if x1 < 0
+        return geomrect.of_xywh_i(m.origin_x, m.origin_y, 0, 0)
+    geomrect.of_xywh_i(m.origin_x + x0, m.origin_y + y0, x1 - x0 + 1, y1 - y0 + 1)
 
 // ── Combining masks ──────────────────────────────────────────────────
 
@@ -197,22 +221,25 @@ pub fn ink_extent(m: RstMask) -> geomrect.GeomRectI []
 // common case: two masks that each cover a pixel fully should leave it
 // fully covered, and 255 times 255 over 255 only just does.
 pub fn intersect(a: RstMask, b: RstMask) -> Result<RstMask, rastererror.RstFault> []
-    todo("raster-nv.rastermask.intersect")
+    combine(a, b, 0)
 
 // The pixel-wise maximum: what either mask covers.
 pub fn union(a: RstMask, b: RstMask) -> Result<RstMask, rastererror.RstFault> []
-    todo("raster-nv.rastermask.union")
+    combine(a, b, 1)
 
 // What `a` covers and `b` does not.
 //
 // For a caller drawing a shape with a hole punched by another shape,
 // where the two are not one path and a fill rule would not reach.
 pub fn subtract(a: RstMask, b: RstMask) -> Result<RstMask, rastererror.RstFault> []
-    todo("raster-nv.rastermask.subtract")
+    combine(a, b, 2)
 
 // 255 minus every byte.
 pub fn invert(m: RstMask) -> RstMask []
-    todo("raster-nv.rastermask.invert")
+    var out = bytes.clone(m.coverage)
+    for i in 0..bytes.len(out)
+        bytes.set_u8(out, i, 255 - (bytes.byte_at(m.coverage, i) ?? 0))
+    with_coverage(m, out)
 
 // Every byte scaled by `alpha`, which is `0.0 ..= 1.0`.
 //
@@ -221,7 +248,12 @@ pub fn invert(m: RstMask) -> RstMask []
 // separately would get a different, wrong picture wherever they
 // overlap.
 pub fn scale(m: RstMask, alpha: Float) -> RstMask []
-    todo("raster-nv.rastermask.scale")
+    let k = math.clamp(alpha, 0.0, 1.0)
+    var out = bytes.clone(m.coverage)
+    for i in 0..bytes.len(out)
+        let v = bytes.byte_at(m.coverage, i) ?? 0
+        bytes.set_u8(out, i, math.round(v as Float * k) as Int)
+    with_coverage(m, out)
 
 // A mask re-measured over a different rectangle, zero-filled where the
 // new rectangle reaches past the old.
@@ -231,7 +263,18 @@ pub fn scale(m: RstMask, alpha: Float) -> RstMask []
 // caller that asked for it, by name.
 pub fn retarget(m: RstMask, extent: geomrect.GeomRectI,
                 limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
-    todo("raster-nv.rastermask.retarget")
+    let want = match build(geomrect.width_i(extent), geomrect.height_i(extent),
+                           extent.min.x, extent.min.y, 0, limits)
+        Err(e) => return Err(e)
+        Ok(r)  => r
+    let box = geomrect.intersection_i(rastermask.extent(m), rastermask.extent(want))
+    var out = bytes.clone(want.coverage)
+    if not geomrect.is_empty_i(box)
+        let run = geomrect.width_i(box)
+        for y in box.min.y..box.max.y
+            bytes.copy_into(out, (y - want.origin_y) * want.width + box.min.x - want.origin_x,
+                            m.coverage, (y - m.origin_y) * m.width + box.min.x - m.origin_x, run)
+    Ok(with_coverage(want, out))
 
 // ── One bit a pixel ──────────────────────────────────────────────────
 
@@ -242,7 +285,11 @@ pub fn retarget(m: RstMask, extent: geomrect.GeomRectI,
 // lower, because anti-aliased stems are mostly partial coverage and a
 // high threshold erases them.
 pub fn threshold(m: RstMask, at_least: Int) -> RstMask []
-    todo("raster-nv.rastermask.threshold")
+    var out = bytes.clone(m.coverage)
+    for i in 0..bytes.len(out)
+        let on = (bytes.byte_at(m.coverage, i) ?? 0) >= at_least
+        bytes.set_u8(out, i, if on then 255 else 0)
+    with_coverage(m, out)
 
 // A thresholded mask's rows packed eight pixels to a byte, most
 // significant bit leftmost.
@@ -255,8 +302,70 @@ pub fn threshold(m: RstMask, at_least: Int) -> RstMask []
 // the thing a caller gets wrong once and then cannot see is wrong —
 // a picture packed the other way looks like static.
 pub fn pack_rows_1bit(m: RstMask) -> Bytes []
-    todo("raster-nv.rastermask.pack_rows_1bit")
+    let stride = (m.width + 7) / 8
+    var out = bytes.zeros(stride * m.height)
+    for y in 0..m.height
+        for x in 0..m.width
+            if (bytes.byte_at(m.coverage, y * m.width + x) ?? 0) >= 128
+                let at = y * stride + x / 8
+                bytes.set_u8(out, at, (bytes.byte_at(out, at) ?? 0) | (128 >> (x % 8)))
+    out
 
 // How many bytes `pack_rows_1bit` would answer.
 pub fn packed_1bit_len(m: RstMask) -> Int []
-    todo("raster-nv.rastermask.packed_1bit_len")
+    (m.width + 7) / 8 * m.height
+
+// The largest pixel count the package will name.  A product past it
+// is reported as this, so that the refusal carries a number instead of
+// an overflowed one.
+fn pixel_ceiling() -> Int
+    4611686018427387904
+
+// `width * height`, held at `pixel_ceiling` rather than overflowing.
+fn pixels_of(width: Int, height: Int) -> Int
+    if height > 0 and width > pixel_ceiling() / height
+        return pixel_ceiling()
+    width * height
+
+// A mask of one value everywhere, after the budget check.
+fn build(width: Int, height: Int, origin_x: Int, origin_y: Int, value: Int,
+         limits: RstLimits) -> Result<RstMask, rastererror.RstFault>
+    if width < 1 or height < 1
+        core.panic.panic("raster-nv.rastermask: a mask is at least 1 by 1, not ${width} by ${height}")
+    let want = pixels_of(width, height)
+    if want > limits.max_pixels
+        return Err(RstTooLarge(want, limits.max_pixels))
+    var buf = bytes.zeros(want)
+    if value != 0
+        bytes.fill(buf, 0, want, value)
+    Ok(RstMask { width: width, height: height, origin_x: origin_x, origin_y: origin_y,
+                 coverage: buf })
+
+// The same rectangle over other bytes.
+fn with_coverage(m: RstMask, coverage: Bytes) -> RstMask
+    RstMask { width: m.width, height: m.height, origin_x: m.origin_x, origin_y: m.origin_y,
+              coverage: coverage }
+
+// Whether every byte equals `value`.
+fn all_equal(m: RstMask, value: Int) -> Bool
+    for i in 0..bytes.len(m.coverage)
+        if (bytes.byte_at(m.coverage, i) ?? 0) != value
+            return false
+    true
+
+// Two masks combined byte by byte: 0 is the minimum, 1 the maximum
+// and 2 the minimum of the first and the complement of the second.
+fn combine(a: RstMask, b: RstMask, op: Int) -> Result<RstMask, rastererror.RstFault>
+    if not same_extent(a, b)
+        return Err(RstExtentMismatch(a.width, a.height, b.width, b.height))
+    var out = bytes.clone(a.coverage)
+    for i in 0..bytes.len(out)
+        let x = bytes.byte_at(a.coverage, i) ?? 0
+        let y = bytes.byte_at(b.coverage, i) ?? 0
+        var v = math.min(x, y)
+        if op == 1
+            v = math.max(x, y)
+        elif op == 2
+            v = math.min(x, 255 - y)
+        bytes.set_u8(out, i, v)
+    Ok(with_coverage(a, out))

@@ -1,8 +1,6 @@
 // rasterpaint.nv — what colour a pixel gets, given that something
 // covered it.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // A PAINT IS A FUNCTION FROM A POINT TO A COLOUR, written as a value.
 // A solid paint ignores the point; a linear gradient projects it onto
 // an axis; a radial gradient measures a distance.  Writing them as one
@@ -27,6 +25,7 @@
 // OVER is unassociated, so a half-transparent white is a white and not
 // a grey.
 
+use geompoint
 use geomxform
 use srgb
 use colorspace
@@ -112,7 +111,7 @@ pub enum RstPaint
 
 // A solid opaque colour.
 pub fn solid(c: srgb.Srgb8) -> RstPaint []
-    todo("raster-nv.rasterpaint.solid")
+    RstSolid(srgb.opaque(c))
 
 // A solid colour with coverage of its own.
 //
@@ -122,7 +121,7 @@ pub fn solid(c: srgb.Srgb8) -> RstPaint []
 // is what a naive implementation does and makes every anti-aliased
 // edge of a transparent shape hard.
 pub fn solid_alpha(c: srgb.Srgba8) -> RstPaint []
-    todo("raster-nv.rasterpaint.solid_alpha")
+    RstSolid(c)
 
 // A two-stop linear gradient between two points.
 //
@@ -130,11 +129,11 @@ pub fn solid_alpha(c: srgb.Srgba8) -> RstPaint []
 // with a stop list.
 pub fn linear(x0: Float, y0: Float, x1: Float, y1: Float, from: srgb.Srgb8,
               to: srgb.Srgb8) -> RstPaint []
-    todo("raster-nv.rasterpaint.linear")
+    RstLinear(x0, y0, x1, y1, two_stops(from, to), default_space(), RstPad)
 
 // A two-stop radial gradient.
 pub fn radial(cx: Float, cy: Float, radius: Float, from: srgb.Srgb8, to: srgb.Srgb8) -> RstPaint []
-    todo("raster-nv.rasterpaint.radial")
+    RstRadial(cx, cy, radius, two_stops(from, to), default_space(), RstPad)
 
 // The space this package interpolates in when a caller does not say:
 // `SpaceOklab`.
@@ -146,7 +145,7 @@ pub fn radial(cx: Float, cy: Float, radius: Float, from: srgb.Srgb8, to: srgb.Sr
 // caller reproducing an existing picture can ask for `SpaceSrgb` by
 // name.
 pub fn default_space() -> colorspace.ColorSpace []
-    todo("raster-nv.rasterpaint.default_space")
+    SpaceOklab
 
 // ── Reading a paint ──────────────────────────────────────────────────
 
@@ -156,7 +155,9 @@ pub fn default_space() -> colorspace.ColorSpace []
 // position and no ramp lookup, which is most of what a plot and a user
 // interface draw.
 pub fn is_solid(p: RstPaint) -> Bool []
-    todo("raster-nv.rasterpaint.is_solid")
+    match p
+        RstSolid(_) => true
+        _           => false
 
 // Whether the paint is opaque at every point.
 //
@@ -165,7 +166,9 @@ pub fn is_solid(p: RstPaint) -> Bool []
 // replaced by a straight write, which is worth knowing before a
 // million pixels.
 pub fn is_opaque(p: RstPaint) -> Bool []
-    todo("raster-nv.rasterpaint.is_opaque")
+    match p
+        RstSolid(c) => c.a == 255
+        _           => true
 
 // The colour at a point in the paint's own coordinates.
 //
@@ -174,7 +177,13 @@ pub fn is_opaque(p: RstPaint) -> Bool []
 // gradient without rasterising anything, and how a caller samples a
 // ramp for a legend.
 pub fn color_at(p: RstPaint, x: Float, y: Float) -> srgb.Srgba8 []
-    todo("raster-nv.rasterpaint.color_at")
+    match p
+        RstSolid(c) => c
+        _           =>
+            let stops = sorted_stops(stops_of(p))
+            if list.is_empty(stops)
+                return srgb.transparent()
+            srgb.opaque(colormix.sample(stops, ramp_position(p, x, y), space_of(p)))
 
 // The gradient parameter at a point: where on the `0.0 ..= 1.0` ramp
 // it falls, before the spread is applied.
@@ -183,11 +192,34 @@ pub fn color_at(p: RstPaint, x: Float, y: Float) -> srgb.Srgba8 []
 // asserts a linear gradient's parameter is 0.5 exactly half way along
 // its axis.
 pub fn parameter_at(p: RstPaint, x: Float, y: Float) -> Float []
-    todo("raster-nv.rasterpaint.parameter_at")
+    match p
+        RstSolid(_)                                 => 0.0
+        RstLinear(x0, y0, x1, y1, _, _, _)          =>
+            let dx = x1 - x0
+            let dy = y1 - y0
+            let len_sq = dx * dx + dy * dy
+            if len_sq <= 0.0
+                return 0.0
+            ((x - x0) * dx + (y - y0) * dy) / len_sq
+        RstRadial(cx, cy, radius, _, _, _)          =>
+            if radius <= 0.0
+                return 0.0
+            math.hypot(x - cx, y - cy) / radius
+        RstSweep(cx, cy, start, _, _, _)            =>
+            let turn = 2.0 * math.pi()
+            let a = math.atan2(y - cy, x - cx) - start
+            let t = (a - turn * math.floor(a / turn)) / turn
+            if t >= 1.0
+                return 0.0
+            t
 
 // The stop list, empty for a solid paint.
 pub fn stops_of(p: RstPaint) -> [colormix.ColorStop] []
-    todo("raster-nv.rasterpaint.stops_of")
+    match p
+        RstSolid(_)                  => []
+        RstLinear(_, _, _, _, s, _, _) => list.clone(s)
+        RstRadial(_, _, _, s, _, _)  => list.clone(s)
+        RstSweep(_, _, _, s, _, _)   => list.clone(s)
 
 // Whether the paint's geometry is usable.
 //
@@ -196,7 +228,10 @@ pub fn stops_of(p: RstPaint) -> [colormix.ColorStop] []
 // makes, published so a caller building paints from a document can
 // validate them all at once.
 pub fn is_usable(p: RstPaint) -> Bool []
-    todo("raster-nv.rasterpaint.is_usable")
+    match p
+        RstLinear(x0, y0, x1, y1, _, _, _) => x0 != x1 or y0 != y1
+        RstRadial(_, _, radius, _, _, _)   => radius > 0.0
+        _                                  => true
 
 // A paint moved into another coordinate system.
 //
@@ -208,7 +243,24 @@ pub fn is_usable(p: RstPaint) -> Bool []
 //
 // `RstSingularTransform` when the matrix collapses the plane.
 pub fn transformed(p: RstPaint, t: geomxform.GeomXform) -> Result<RstPaint, rastererror.RstFault> []
-    todo("raster-nv.rasterpaint.transformed")
+    if not geomxform.is_invertible(t)
+        return Err(RstSingularTransform)
+    match p
+        RstSolid(_)                                      => Ok(p)
+        RstLinear(x0, y0, x1, y1, s, sp, spread)         =>
+            let a = geomxform.apply_point(t, geompoint.ptf(x0, y0))
+            let b = geomxform.apply_point(t, geompoint.ptf(x1, y1))
+            Ok(RstLinear(a.x, a.y, b.x, b.y, s, sp, spread))
+        RstRadial(cx, cy, radius, s, sp, spread)         =>
+            let c = geomxform.apply_point(t, geompoint.ptf(cx, cy))
+            Ok(RstRadial(c.x, c.y, radius * math.sqrt(math.abs(geomxform.determinant(t))), s, sp,
+                         spread))
+        RstSweep(cx, cy, start, s, sp, spread)           =>
+            let c = geomxform.apply_point(t, geompoint.ptf(cx, cy))
+            let turn = math.atan2(t.b, t.a)
+            if geomxform.determinant(t) > 0.0
+                return Ok(RstSweep(c.x, c.y, start + turn, s, sp, spread))
+            Ok(RstSweep(c.x, c.y, turn - start, reversed_stops(s), sp, spread))
 
 // ── Blending ─────────────────────────────────────────────────────────
 
@@ -219,7 +271,7 @@ pub fn transformed(p: RstPaint, t: geomxform.GeomXform) -> Result<RstPaint, rast
 // here so the composite loop's definition is one call rather than a
 // paragraph. The two agreeing is a test.
 pub fn blend_over(src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 []
-    todo("raster-nv.rasterpaint.blend_over")
+    blend(RstOver, src, dst)
 
 // Any blend mode at one pixel.
 //
@@ -228,7 +280,78 @@ pub fn blend_over(src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 []
 // not draw — a video frame, a decoded photograph — can use the same
 // modes.
 pub fn blend(mode: RstBlend, src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 []
-    todo("raster-nv.rasterpaint.blend")
+    packed_to_pixel(blend_packed(mode, pixel_to_packed(src), pixel_to_packed(dst), 255))
+
+// Any blend mode at one pixel held as an integer: red in the highest
+// byte, then green, blue and alpha in the lowest, unassociated like
+// `Srgba8`.
+//
+// `coverage` is `0 ..= 255` and says how far the result is taken from
+// the destination towards the mode's own answer: 0 leaves the
+// destination as it was and 255 is `blend`.  This is the form the
+// compositing loop uses, because a pixel in an integer allocates
+// nothing and a million of them are a million fewer allocations.
+//
+// ```novo
+// use rasterpaint
+//
+// fn main() [io]
+//     let white = 0xFFFFFFFF
+//     let ink = 0x000000FF
+//     println("${rasterpaint.blend_packed(RstOver, ink, white, 128)}")
+// ```
+pub fn blend_packed(mode: RstBlend, src: Int, dst: Int, coverage: Int) -> Int []
+    unpremultiplied(mix_pixel(mode, premultiplied(src), premultiplied(dst),
+                              coverage as Float / 255.0))
+
+// Where on the ramp a point falls, after the spread: `0.0 ..= 1.0`.
+//
+// `parameter_at` with the paint's own spread applied, so a loop that
+// has built `ramp_packed` once indexes it with this and no more.
+// A solid paint answers 0.
+//
+// ```novo
+// use rasterpaint
+// use srgb
+//
+// fn main() [io]
+//     let p = rasterpaint.linear(0.0, 0.0, 10.0, 0.0, srgb.black(), srgb.white())
+//     println("${rasterpaint.ramp_position(p, 5.0, 0.0)}")   // 0.5
+// ```
+pub fn ramp_position(p: RstPaint, x: Float, y: Float) -> Float []
+    spread_of(p, parameter_at(p, x, y))
+
+// The paint's ramp as `n` colours, each packed as red in the highest
+// byte, then green, blue and alpha in the lowest.
+//
+// The table a compositing loop indexes instead of interpolating at
+// every pixel.  A solid paint answers one entry per slot, all its
+// colour; a gradient without stops answers transparent.
+//
+// ```novo
+// use rasterpaint
+// use srgb
+//
+// fn main() [io]
+//     let p = rasterpaint.solid(srgb.white())
+//     println("${rasterpaint.ramp_packed(p, 4)[0]}")         // 4294967295
+// ```
+pub fn ramp_packed(p: RstPaint, n: Int) -> [Int] []
+    var out: [Int] = []
+    match p
+        RstSolid(c) =>
+            for _ in 0..n
+                list.push(out, pixel_to_packed(c))
+        _           =>
+            let stops = sorted_stops(stops_of(p))
+            for i in 0..n
+                if list.is_empty(stops)
+                    list.push(out, 0)
+                else
+                    let t = i as Float / math.max(1.0, (n - 1) as Float)
+                    let c = colormix.sample(stops, t, space_of(p))
+                    list.push(out, (c.r << 24) | (c.g << 16) | (c.b << 8) | 255)
+    out
 
 // Whether a mode can make the destination MORE transparent.
 //
@@ -237,11 +360,16 @@ pub fn blend(mode: RstBlend, src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 
 // the other modes only ever add coverage, so a layer drawn with them
 // can be accumulated in any order.
 pub fn reduces_alpha(mode: RstBlend) -> Bool []
-    todo("raster-nv.rasterpaint.reduces_alpha")
+    match mode
+        RstSrcCopy => true
+        RstSrcIn   => true
+        RstSrcOut  => true
+        _          => false
 
 // The blend modes this package implements.
 pub fn modes_supported() -> [RstBlend] []
-    todo("raster-nv.rasterpaint.modes_supported")
+    [RstOver, RstSrcCopy, RstSrcIn, RstSrcOut, RstPlus, RstMultiply, RstScreen, RstOverlay,
+     RstDarken, RstLighten, RstDifference]
 
 // The name of a blend mode, in CSS's spelling.
 //
@@ -249,4 +377,147 @@ pub fn modes_supported() -> [RstBlend] []
 // reading an SVG's `mix-blend-mode` can match on the string it found
 // rather than writing the table a second time.
 pub fn mode_name(mode: RstBlend) -> Str []
-    todo("raster-nv.rasterpaint.mode_name")
+    match mode
+        RstOver       => "source-over"
+        RstSrcCopy    => "copy"
+        RstSrcIn      => "source-in"
+        RstSrcOut     => "source-out"
+        RstPlus       => "plus-lighter"
+        RstMultiply   => "multiply"
+        RstScreen     => "screen"
+        RstOverlay    => "overlay"
+        RstDarken     => "darken"
+        RstLighten    => "lighten"
+        RstDifference => "difference"
+
+// ── Inside the blend and the ramp ────────────────────────────────────
+
+// A colour with its channels already multiplied by its alpha, all four
+// in `0.0 ..= 1.0`.  A value struct, so a blend allocates nothing.
+@value
+struct RstPx
+    r: Float
+    g: Float
+    b: Float
+    a: Float
+
+fn two_stops(from: srgb.Srgb8, to: srgb.Srgb8) -> [colormix.ColorStop]
+    [colormix.ColorStop { at: 0.0, color: from }, colormix.ColorStop { at: 1.0, color: to }]
+
+// The stops in order of position, which `colormix.sample` requires.
+// Equal positions keep their order, so a hard stop stays hard.
+fn sorted_stops(stops: [colormix.ColorStop]) -> [colormix.ColorStop]
+    if colormix.ramp_is_sorted(stops)
+        return stops[:]
+    var copy = list.clone(stops)
+    list.sort_by(copy, s => s.at)
+    copy
+
+fn reversed_stops(stops: [colormix.ColorStop]) -> [colormix.ColorStop]
+    var out: [colormix.ColorStop] = []
+    for i in 0..list.len(stops)
+        let s = stops[list.len(stops) - 1 - i]
+        list.push(out, colormix.ColorStop { at: 1.0 - s.at, color: s.color })
+    out
+
+fn space_of(p: RstPaint) -> colorspace.ColorSpace
+    match p
+        RstLinear(_, _, _, _, _, sp, _) => sp
+        RstRadial(_, _, _, _, sp, _)    => sp
+        RstSweep(_, _, _, _, sp, _)     => sp
+        RstSolid(_)                     => default_space()
+
+// A parameter brought into `0.0 ..= 1.0` by the paint's spread.
+fn spread_of(p: RstPaint, t: Float) -> Float
+    match p
+        RstLinear(_, _, _, _, _, _, sp) => spread(sp, t)
+        RstRadial(_, _, _, _, _, sp)    => spread(sp, t)
+        RstSweep(_, _, _, _, _, sp)     => spread(sp, t)
+        RstSolid(_)                     => t
+
+fn spread(sp: RstSpread, t: Float) -> Float
+    match sp
+        RstPad     => math.clamp(t, 0.0, 1.0)
+        RstRepeat  => t - math.floor(t)
+        RstReflect =>
+            let u = t - 2.0 * math.floor(t / 2.0)
+            if u > 1.0
+                2.0 - u
+            else
+                u
+
+fn pixel_to_packed(c: srgb.Srgba8) -> Int
+    (c.rgb.r << 24) | (c.rgb.g << 16) | (c.rgb.b << 8) | c.a
+
+fn premultiplied(v: Int) -> RstPx
+    let a = (v & 255) as Float / 255.0
+    RstPx { r: ((v >> 24) & 255) as Float / 255.0 * a, g: ((v >> 16) & 255) as Float / 255.0 * a,
+            b: ((v >> 8) & 255) as Float / 255.0 * a, a: a }
+
+// One 8-bit channel from a premultiplied one and the alpha.
+fn channel_byte(v: Float, a: Float) -> Int
+    math.min(255, math.max(0, math.round(v / a * 255.0) as Int))
+
+// The four bytes of a pixel, red in the high byte and alpha in the low.
+// Fully transparent is all zero.
+fn unpremultiplied(p: RstPx) -> Int
+    if p.a <= 0.0
+        return 0
+    let a = math.min(255, math.max(0, math.round(p.a * 255.0) as Int))
+    if a == 0
+        return 0
+    (channel_byte(p.r, p.a) << 24) | (channel_byte(p.g, p.a) << 16) | (channel_byte(p.b, p.a) << 8) | a
+
+fn packed_to_pixel(v: Int) -> srgb.Srgba8
+    srgb.Srgba8 { rgb: srgb.rgb8((v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255), a: v & 255 }
+
+// The mode applied to one premultiplied source over one premultiplied
+// destination, then taken from the destination towards the result by
+// `cov`, which is `0.0 ..= 1.0`.  At 0 the destination is untouched and
+// at 1 the result is the mode's own.
+fn mix_pixel(mode: RstBlend, s: RstPx, d: RstPx, cov: Float) -> RstPx
+    var r = mode_result(mode, s, d)
+    if cov < 1.0
+        r = RstPx { r: d.r + (r.r - d.r) * cov, g: d.g + (r.g - d.g) * cov,
+                    b: d.b + (r.b - d.b) * cov, a: d.a + (r.a - d.a) * cov }
+    r
+
+fn mode_result(mode: RstBlend, s: RstPx, d: RstPx) -> RstPx
+    match mode
+        RstOver     => RstPx { r: s.r + d.r * (1.0 - s.a), g: s.g + d.g * (1.0 - s.a),
+                               b: s.b + d.b * (1.0 - s.a), a: s.a + d.a * (1.0 - s.a) }
+        RstSrcCopy  => s
+        RstSrcIn    => RstPx { r: s.r * d.a, g: s.g * d.a, b: s.b * d.a, a: s.a * d.a }
+        RstSrcOut   => RstPx { r: s.r * (1.0 - d.a), g: s.g * (1.0 - d.a), b: s.b * (1.0 - d.a),
+                               a: s.a * (1.0 - d.a) }
+        RstPlus     => RstPx { r: math.min(1.0, s.r + d.r), g: math.min(1.0, s.g + d.g),
+                               b: math.min(1.0, s.b + d.b), a: math.min(1.0, s.a + d.a) }
+        _           => RstPx { r: separable(mode, s.r, s.a, d.r, d.a),
+                               g: separable(mode, s.g, s.a, d.g, d.a),
+                               b: separable(mode, s.b, s.a, d.b, d.a),
+                               a: s.a + d.a - s.a * d.a }
+
+// One channel of a separable blend, from premultiplied channels: the
+// parts of each side the other does not cover, and the mode's function
+// of the two colours where both do.
+fn separable(mode: RstBlend, cs: Float, sa: Float, cb: Float, da: Float) -> Float
+    var both = 0.0
+    if sa > 0.0 and da > 0.0
+        both = blend_function(mode, cb / da, cs / sa) * sa * da
+    cs * (1.0 - da) + cb * (1.0 - sa) + both
+
+// The separable modes' function of the backdrop colour and the source
+// colour, both unassociated.
+fn blend_function(mode: RstBlend, cb: Float, cs: Float) -> Float
+    match mode
+        RstMultiply   => cb * cs
+        RstScreen     => cb + cs - cb * cs
+        RstOverlay    =>
+            if cb <= 0.5
+                2.0 * cb * cs
+            else
+                let k = 2.0 * cb - 1.0
+                cs + k - cs * k
+        RstDarken     => math.min(cb, cs)
+        RstLighten    => math.max(cb, cs)
+        _             => math.abs(cb - cs)

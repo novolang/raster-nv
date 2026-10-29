@@ -1,8 +1,6 @@
 // rasterdraw.nv — compositing: a mask, a paint, and an image the
 // caller owns.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // EVERY CALL HERE TAKES AN `Image` AND ANSWERS AN `Image`.  There is no
 // canvas type, no surface, no context that holds state between calls.
 // A caller owns its pixels, hands them over, and gets them back — and
@@ -35,6 +33,7 @@
 // an axis label is `rasterglyph.draw_run`, and a gridline is
 // `fill_rect`.  No fifth kind of operation and no state between them.
 
+use geompoint
 use geomrect
 use geomxform
 use image
@@ -75,14 +74,16 @@ pub struct RstDrawOpts
 // image, source-over, no shaped clip, identity paint transform, the
 // default flattening and limits.
 pub fn opts(w: Int, h: Int) -> RstDrawOpts []
-    todo("raster-nv.rasterdraw.opts")
+    opts_at(geomrect.of_xywh_i(0, 0, w, h))
 
 // The ordinary options confined to a rectangle.
 //
 // The call a tiled renderer makes per tile, and what `plotraster`
 // would pass on every operation.
 pub fn opts_at(clip: geomrect.GeomRectI) -> RstDrawOpts []
-    todo("raster-nv.rasterdraw.opts_at")
+    RstDrawOpts { clip_rect: clip, clip_mask: None, blend: RstOver,
+                  paint_xform: geomxform.identity(), flatten: rasterfill.default_flatten(),
+                  limits: rastermask.default_limits() }
 
 // The same options with a shaped clip.
 //
@@ -91,11 +92,13 @@ pub fn opts_at(clip: geomrect.GeomRectI) -> RstDrawOpts []
 // remember to change back — which a value cannot get wrong and a
 // canvas can.
 pub fn with_clip(o: RstDrawOpts, m: rastermask.RstMask) -> RstDrawOpts []
-    todo("raster-nv.rasterdraw.with_clip")
+    RstDrawOpts { clip_rect: o.clip_rect, clip_mask: Some(m), blend: o.blend,
+                  paint_xform: o.paint_xform, flatten: o.flatten, limits: o.limits }
 
 // The same options with a different blend mode.
 pub fn with_blend(o: RstDrawOpts, b: rasterpaint.RstBlend) -> RstDrawOpts []
-    todo("raster-nv.rasterdraw.with_blend")
+    RstDrawOpts { clip_rect: o.clip_rect, clip_mask: o.clip_mask, blend: b,
+                  paint_xform: o.paint_xform, flatten: o.flatten, limits: o.limits }
 
 // The pixel kinds this package composites into.
 //
@@ -105,11 +108,11 @@ pub fn with_blend(o: RstDrawOpts, b: rasterpaint.RstBlend) -> RstDrawOpts []
 // and a caller working at 16 bits chose that precision for a reason.
 // `RstPixelKind` carries the kind's name when one reaches a draw.
 pub fn kinds_supported() -> [PixelKind] []
-    todo("raster-nv.rasterdraw.kinds_supported")
+    [PixRgba8, PixRgb8, PixLumaAlpha8, PixLuma8]
 
 // Whether an image can be drawn into.
 pub fn can_draw_into(img: Image) -> Bool []
-    todo("raster-nv.rasterdraw.can_draw_into")
+    img.kind == PixRgba8 or img.kind == PixRgb8 or img.kind == PixLumaAlpha8 or img.kind == PixLuma8
 
 // ── The one composite ────────────────────────────────────────────────
 
@@ -124,7 +127,7 @@ pub fn can_draw_into(img: Image) -> Bool []
 // being a value.
 pub fn composite(img: Image, m: rastermask.RstMask, paint: rasterpaint.RstPaint,
                  o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.composite")
+    paint_region(img, Some(m), rastermask.extent(m), paint, o.blend, o)
 
 // ── The four calls a renderer makes ──────────────────────────────────
 
@@ -140,7 +143,10 @@ pub fn composite(img: Image, m: rastermask.RstMask, paint: rasterpaint.RstPaint,
 pub fn fill_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint, rule: GeomFillRule,
                  xform: geomxform.GeomXform,
                  o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.fill_path")
+    let mask = match rasterfill.fill(path, xform, drawable(img, o), rule, o.flatten, o.limits)
+        Err(e) => return Err(e)
+        Ok(m)  => m
+    composite(img, mask, paint, o)
 
 // Stroke a path.
 //
@@ -151,7 +157,23 @@ pub fn fill_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint,
 pub fn stroke_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint,
                    style: rasterstroke.RstStrokeStyle, xform: geomxform.GeomXform,
                    o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.stroke_path")
+    var st = style
+    if rasterstroke.is_hairline(style)
+        let scale = math.sqrt(math.abs(geomxform.determinant(xform)))
+        if scale <= 0.0
+            return Err(RstSingularTransform)
+        st = rasterstroke.solid(1.0 / scale)
+        st = RstStrokeStyle { width: st.width, join: style.join, cap: style.cap,
+                              miter_limit: style.miter_limit, dash: style.dash,
+                              dash_offset: style.dash_offset }
+    let ink = match rasterstroke.outline(path, st)
+        Err(e) => return Err(e)
+        Ok(p)  => p
+    let mask = match rasterfill.fill(ink, xform, drawable(img, o), rasterstroke.fill_rule(), o.flatten,
+                                     o.limits)
+        Err(e) => return Err(e)
+        Ok(m)  => m
+    composite(img, mask, paint, o)
 
 // Fill an axis-aligned rectangle.
 //
@@ -160,7 +182,10 @@ pub fn stroke_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPain
 // which the test suite asserts rather than assumes.
 pub fn fill_rect(img: Image, r: geomrect.GeomRectF, paint: rasterpaint.RstPaint,
                  o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.fill_rect")
+    let mask = match rasterfill.fill_rect(r, drawable(img, o), o.limits)
+        Err(e) => return Err(e)
+        Ok(m)  => m
+    composite(img, mask, paint, o)
 
 // Fill the whole clip rectangle with one colour, ignoring the blend
 // mode.
@@ -170,7 +195,7 @@ pub fn fill_rect(img: Image, r: geomrect.GeomRectF, paint: rasterpaint.RstPaint,
 // wants the alpha gone, and `RstOver` with a transparent source is a
 // no-op.
 pub fn clear(img: Image, c: srgb.Srgba8, o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.clear")
+    paint_region(img, None, drawable(img, o), rasterpaint.solid_alpha(c), RstSrcCopy, o)
 
 // ── Drawing one image into another ───────────────────────────────────
 
@@ -183,7 +208,28 @@ pub fn clear(img: Image, c: srgb.Srgba8, o: RstDrawOpts) -> Result<Image, raster
 // to a question that already has one.
 pub fn draw_image(dst: Image, src: Image, at_x: Int, at_y: Int,
                   o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.draw_image")
+    if not can_draw_into(dst)
+        return Err(RstPixelKind(kind_name(dst.kind)))
+    let region = geomrect.intersection_i(geomrect.of_xywh_i(at_x, at_y, src.width, src.height),
+                                         drawable(dst, o))
+    if geomrect.is_empty_i(region)
+        return Ok(dst)
+    var buf = bytes.clone(dst.samples)
+    let dstep = image.bytes_per_pixel(dst.kind)
+    let sstep = image.bytes_per_pixel(src.kind)
+    for y in region.min.y..region.max.y
+        for x in region.min.x..region.max.x
+            let cov = shaped_clip(o, x, y, 255)
+            if cov > 0
+                let at = (y - at_y) * image.stride(src) + (x - at_x) * sstep
+                let sp = (image.read16(src.samples, at, src.kind, 0) >> 8 << 24)
+                    | (image.read16(src.samples, at, src.kind, 1) >> 8 << 16)
+                    | (image.read16(src.samples, at, src.kind, 2) >> 8 << 8)
+                    | (image.read16(src.samples, at, src.kind, 3) >> 8)
+                let to = y * image.stride(dst) + x * dstep
+                store_pixel(var buf, to, dst.kind,
+                            rasterpaint.blend_packed(o.blend, sp, load_pixel(buf, to, dst.kind), cov))
+    Ok(Image { width: dst.width, height: dst.height, kind: dst.kind, samples: buf })
 
 // A coverage mask as a greyscale image.
 //
@@ -192,7 +238,7 @@ pub fn draw_image(dst: Image, src: Image, at_x: Int, at_y: Int,
 // no conversion.  What a test looks at when a picture is wrong, and
 // what a glyph atlas uploads to a GPU.
 pub fn mask_to_image(m: rastermask.RstMask) -> Image []
-    todo("raster-nv.rasterdraw.mask_to_image")
+    Image { width: m.width, height: m.height, kind: PixLuma8, samples: bytes.clone(m.coverage) }
 
 // An image's alpha channel as a coverage mask.
 //
@@ -201,4 +247,134 @@ pub fn mask_to_image(m: rastermask.RstMask) -> Image []
 // a clip without this package knowing what a PNG is.
 pub fn image_to_mask(img: Image, origin_x: Int, origin_y: Int,
                      limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
-    todo("raster-nv.rasterdraw.image_to_mask")
+    let opaque = match rastermask.full(img.width, img.height, origin_x, origin_y, limits)
+        Err(e) => return Err(e)
+        Ok(m)  => m
+    if not image.has_alpha(img.kind)
+        return Ok(opaque)
+    var buf = bytes.clone(opaque.coverage)
+    let step = image.bytes_per_pixel(img.kind)
+    for i in 0..img.width * img.height
+        bytes.set_u8(buf, i, image.read16(img.samples, i * step, img.kind, 3) >> 8)
+    Ok(RstMask { width: img.width, height: img.height, origin_x: origin_x, origin_y: origin_y,
+                 coverage: buf })
+
+// ── The compositing loop ─────────────────────────────────────────────
+
+// The name of a pixel kind, as `RstPixelKind` carries it.
+fn kind_name(k: PixelKind) -> Str
+    match k
+        PixLuma8       => "PixLuma8"
+        PixLumaAlpha8  => "PixLumaAlpha8"
+        PixRgb8        => "PixRgb8"
+        PixRgba8       => "PixRgba8"
+        PixLuma16      => "PixLuma16"
+        PixLumaAlpha16 => "PixLumaAlpha16"
+        PixRgb16       => "PixRgb16"
+        PixRgba16      => "PixRgba16"
+
+// The pixels a draw may touch: the clip rectangle inside the image.
+fn drawable(img: Image, o: RstDrawOpts) -> geomrect.GeomRectI
+    geomrect.intersection_i(o.clip_rect, geomrect.of_xywh_i(0, 0, img.width, img.height))
+
+// A coverage byte taken through the shaped clip, when there is one.
+fn shaped_clip(o: RstDrawOpts, x: Int, y: Int, cov: Int) -> Int
+    match o.clip_mask
+        None    => cov
+        Some(c) => (cov * rastermask.at(c, x, y) + 127) / 255
+
+// A pixel of an image in the packed form `rasterpaint.blend_packed`
+// takes.  Grey kinds repeat the grey in all three colours and kinds
+// without alpha read as opaque.
+fn load_pixel(buf: Bytes, at: Int, k: PixelKind) -> Int
+    match k
+        PixRgba8      =>
+            ((bytes.byte_at(buf, at) ?? 0) << 24) | ((bytes.byte_at(buf, at + 1) ?? 0) << 16)
+                | ((bytes.byte_at(buf, at + 2) ?? 0) << 8) | (bytes.byte_at(buf, at + 3) ?? 0)
+        PixRgb8       =>
+            ((bytes.byte_at(buf, at) ?? 0) << 24) | ((bytes.byte_at(buf, at + 1) ?? 0) << 16)
+                | ((bytes.byte_at(buf, at + 2) ?? 0) << 8) | 255
+        PixLumaAlpha8 =>
+            let g = bytes.byte_at(buf, at) ?? 0
+            (g << 24) | (g << 16) | (g << 8) | (bytes.byte_at(buf, at + 1) ?? 0)
+        _             =>
+            let g = bytes.byte_at(buf, at) ?? 0
+            (g << 24) | (g << 16) | (g << 8) | 255
+
+// A packed pixel written back.  A kind without alpha drops it, and a
+// grey kind takes the luminance of the three colours, as image-nv does.
+fn store_pixel(var buf: Bytes, at: Int, k: PixelKind, v: Int)
+    let r = (v >> 24) & 255
+    let g = (v >> 16) & 255
+    let b = (v >> 8) & 255
+    let a = v & 255
+    match k
+        PixRgba8      =>
+            bytes.set_u8(buf, at, r)
+            bytes.set_u8(buf, at + 1, g)
+            bytes.set_u8(buf, at + 2, b)
+            bytes.set_u8(buf, at + 3, a)
+        PixRgb8       =>
+            bytes.set_u8(buf, at, r)
+            bytes.set_u8(buf, at + 1, g)
+            bytes.set_u8(buf, at + 2, b)
+        _             =>
+            if r == g and g == b
+                bytes.set_u8(buf, at, r)
+                if k == PixLumaAlpha8
+                    bytes.set_u8(buf, at + 1, a)
+            else
+                image.write16(var buf, at, k, r * 257, g * 257, b * 257, a * 257)
+
+// Paint the pixels of `region` through a mask (or at full coverage when
+// there is none), with a blend mode, and answer the new image.
+fn paint_region(img: Image, m: ?rastermask.RstMask, region: geomrect.GeomRectI,
+                paint: rasterpaint.RstPaint, mode: rasterpaint.RstBlend,
+                o: RstDrawOpts) -> Result<Image, rastererror.RstFault>
+    if not can_draw_into(img)
+        return Err(RstPixelKind(kind_name(img.kind)))
+    if not rasterpaint.is_usable(paint)
+        return Err(RstDegenerateGradient)
+    let solid = rasterpaint.is_solid(paint)
+    if not solid and not geomxform.is_invertible(o.paint_xform)
+        return Err(RstSingularTransform)
+    let box = geomrect.intersection_i(geomrect.intersection_i(region, drawable(img, o)),
+                                      geomrect.of_xywh_i(0, 0, img.width, img.height))
+    if geomrect.is_empty_i(box)
+        return Ok(img)
+    var buf = bytes.clone(img.samples)
+    let step = image.bytes_per_pixel(img.kind)
+    let stride = image.stride(img)
+    let inv = geomxform.invert(o.paint_xform)
+    var ramp: [Int] = []
+    if not solid
+        ramp = rasterpaint.ramp_packed(paint, ramp_size())
+    var fixed = 0
+    var opaque_write = false
+    if solid
+        fixed = rasterpaint.ramp_packed(paint, 1)[0]
+        opaque_write = (fixed & 255) == 255 and (mode == RstOver or mode == RstSrcCopy)
+    for y in box.min.y..box.max.y
+        for x in box.min.x..box.max.x
+            var cov = 255
+            match m
+                Some(mask) => cov = rastermask.at(mask, x, y)
+                None       => cov = 255
+            cov = shaped_clip(o, x, y, cov)
+            if cov > 0
+                var src = fixed
+                if not solid
+                    let q = geomxform.apply_point(inv, geompoint.ptf(x as Float + 0.5, y as Float + 0.5))
+                    let t = rasterpaint.ramp_position(paint, q.x, q.y)
+                    src = ramp[math.round(t * (ramp_size() - 1) as Float) as Int]
+                let at = y * stride + x * step
+                if cov == 255 and (opaque_write or mode == RstSrcCopy and (src & 255) == 255)
+                    store_pixel(var buf, at, img.kind, src)
+                else
+                    store_pixel(var buf, at, img.kind,
+                                rasterpaint.blend_packed(mode, src, load_pixel(buf, at, img.kind), cov))
+    Ok(Image { width: img.width, height: img.height, kind: img.kind, samples: buf })
+
+// How many colours a gradient is tabulated into.
+fn ramp_size() -> Int
+    1024

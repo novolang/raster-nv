@@ -69,7 +69,7 @@ color-nv = "^0.1.1"
 # Declaring a target type of its own would mean a caller converting
 # between two flat pixel buffers to move between png-nv and this, which
 # is the whole reason image-nv sits at the bottom of the imaging stack.
-image-nv = "^0.0.3"
+image-nv = "^0.1.0"
 
 # font-nv, by PATH while both are being developed together.
 #
@@ -85,4 +85,4 @@ image-nv = "^0.0.3"
 # units, `GeomXform` from `fontmetric.scale_for_px`, and
 # `FontShaped` for a whole run.  Every other module is reachable
 # without it.
-font-nv = "^0.0.3"
+font-nv = "^0.1.0"
