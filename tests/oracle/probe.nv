@@ -17,6 +17,15 @@ use svgpath
 use rastermask
 use rasterfill
 use rasterstroke
+use rasterpaint
+use srgb
+use colormix
+use colorspace
+use fontread
+use fontdir
+use fontshape
+use fontmetric
+use rasterglyph
 
 fn num(s: Str) -> Float
     str.to_float(s) ?? 0.0
@@ -69,11 +78,130 @@ fn run_fill(t: [Str])
         Ok(m)  => print_mask(m, w, h)
         Err(e) => println("error")
 
+fn hex_color(s: Str) -> srgb.Srgb8
+    let b = bytes.from_hex(s) ?? bytes.zeros(3)
+    srgb.rgb8(bytes.byte_at(b, 0) ?? 0, bytes.byte_at(b, 1) ?? 0, bytes.byte_at(b, 2) ?? 0)
+
+fn mode_of(name: Str) -> RstBlend
+    for m in rasterpaint.modes_supported()
+        if rasterpaint.mode_name(m) == name
+            return m
+    RstOver
+
+// name mode sr sg sb sa dr dg db da: one blend, printed as r g b a.
+fn run_blend(t: [Str])
+    let s = srgb.Srgba8 { rgb: srgb.rgb8(whole(t[2]), whole(t[3]), whole(t[4])), a: whole(t[5]) }
+    let d = srgb.Srgba8 { rgb: srgb.rgb8(whole(t[6]), whole(t[7]), whole(t[8])), a: whole(t[9]) }
+    let r = rasterpaint.blend(mode_of(t[1]), s, d)
+    println("${t[0]} ${r.rgb.r} ${r.rgb.g} ${r.rgb.b} ${r.a}")
+
+fn space_of(name: Str) -> colorspace.ColorSpace
+    if name == "oklab"
+        return SpaceOklab
+    SpaceSrgb
+
+fn spread_of(name: Str) -> RstSpread
+    if name == "repeat"
+        return RstRepeat
+    if name == "reflect"
+        return RstReflect
+    RstPad
+
+// name W H kind spread space g0 g1 g2 g3 at:RRGGBB ...: a gradient sampled at pixel centres.
+fn run_paint(t: [Str])
+    let w = whole(t[1])
+    let h = whole(t[2])
+    var stops: [colormix.ColorStop] = []
+    for i in 10..list.len(t)
+        let pair = str.split(t[i], ":")
+        list.push(stops, colormix.ColorStop { at: num(pair[0]), color: hex_color(pair[1]) })
+    var p = rasterpaint.solid(srgb.black())
+    if t[3] == "linear"
+        p = RstLinear(num(t[6]), num(t[7]), num(t[8]), num(t[9]), stops, space_of(t[5]), spread_of(t[4]))
+    elif t[3] == "radial"
+        p = RstRadial(num(t[6]), num(t[7]), num(t[8]), stops, space_of(t[5]), spread_of(t[4]))
+    else
+        p = RstSweep(num(t[6]), num(t[7]), num(t[8]), stops, space_of(t[5]), spread_of(t[4]))
+    println("== ${t[0]}")
+    for y in 0..h
+        var row = ""
+        for x in 0..w
+            let c = rasterpaint.color_at(p, x as Float + 0.5, y as Float + 0.5)
+            row = row + "${c.rgb.r},${c.rgb.g},${c.rgb.b} "
+        println(row)
+
+// name W H width cap join miter offset dashes | path: a stroke filled non-zero.
+fn run_stroke(t: [Str])
+    let w = whole(t[1])
+    let h = whole(t[2])
+    var cap = RstButt
+    if t[4] == "r"
+        cap = RstRoundCap
+    elif t[4] == "s"
+        cap = RstSquare
+    var join = RstMiter
+    if t[5] == "r"
+        join = RstRound
+    elif t[5] == "b"
+        join = RstBevel
+    var dashes: [Float] = []
+    if t[8] != "-"
+        for d in str.split(t[8], ",")
+            list.push(dashes, num(d))
+    let style = RstStrokeStyle { width: num(t[3]), join: join, cap: cap, miter_limit: num(t[6]),
+                                 dash: dashes, dash_offset: num(t[7]) }
+    println("== ${t[0]}")
+    match rasterstroke.outline(path_of(t, 9), style)
+        Err(e) => println("error")
+        Ok(ink) =>
+            match rasterfill.fill(ink, geomxform.identity(), geomrect.of_xywh_i(0, 0, w, h), GeomNonZero,
+                                  RstFlatten { tolerance: 0.02, max_per_curve: 4096 },
+                                  rastermask.default_limits())
+                Ok(m)  => print_mask(m, w, h)
+                Err(e) => println("error")
+
+// glyph FONT TEXT PIXELS: each distinct glyph of the text rasterised at a whole
+// pen position, printed as its bearings, its size and its coverage rows.
+fn run_glyph(t: [Str]) [io, fs]
+    let file = fs.read_bytes(t[1]) ?? bytes.zeros(0)
+    let src = fontread.buffer(file)
+    let face = fontread.read_face(src, 0)!
+    let plan = fontread.read_plan(src, face, fontdir.tag_of("latn"), [])!
+    let loca = fontread.read_loca(src, face, plan.metrics)!
+    let run = fontshape.shape(plan, t[2])!
+    var ids: [Int] = []
+    for pl in run.glyphs
+        if not list.contains(ids, pl.glyph)
+            list.push(ids, pl.glyph)
+    let outlines = fontread.read_outlines(src, face, loca, ids)!
+    let scale = fontmetric.scale_for_px(plan.metrics, num(t[3]))
+    for i in 0..list.len(ids)
+        match rasterglyph.rasterize(outlines[i], scale, 0.0, 0, RstFlatten { tolerance: 0.01, max_per_curve: 4096 },
+                                    rastermask.default_limits())
+            Err(e) => println("== g${ids[i]}\nerror")
+            Ok(g)  =>
+                println("== g${ids[i]}")
+                println("${g.bearing_x} ${g.bearing_y} ${g.mask.width} ${g.mask.height}")
+                for y in 0..g.mask.height
+                    var row = ""
+                    for x in 0..g.mask.width
+                        row = row + "${rastermask.at(g.mask, g.mask.origin_x + x, g.mask.origin_y + y)} "
+                    println(row)
+
 fn main() [io, fs]
     let args = env.user_args()
+    if args[0] == "glyph"
+        run_glyph(args)
+        return
     let text = fs.read(args[1]) ?? ""
     for line in str.lines(text)
         let t = str.split(str.trim(line), " ")
         if list.len(t) > 4
             if args[0] == "fill"
                 run_fill(t)
+            elif args[0] == "paint"
+                run_paint(t)
+            elif args[0] == "stroke"
+                run_stroke(t)
+        if list.len(t) == 10 and args[0] == "blend"
+            run_blend(t)

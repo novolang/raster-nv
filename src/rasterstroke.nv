@@ -246,12 +246,12 @@ fn unit_width(style: RstStrokeStyle) -> Float
     style.width
 
 // The distance a flattened curve may stray from the true one, in path
-// units: a fiftieth of the line width, so the stroke is smooth at
+// units: a two-hundredth of the line width, so the stroke is smooth at
 // whatever size it is drawn.
 fn default_tolerance(style: RstStrokeStyle) -> Float
-    math.max(unit_width(style) * 0.02, 0.000001)
+    math.max(unit_width(style) * 0.005, 0.000001)
 
-// A fiftieth of the smallest dash, for the same reason.
+// A two-hundredth of the smallest dash, for the same reason.
 fn dash_tolerance(pattern: [Float]) -> Float
     var least = math.infinity()
     for v in pattern
@@ -259,7 +259,7 @@ fn dash_tolerance(pattern: [Float]) -> Float
             least = math.min(least, v)
     if math.is_inf(least)
         return 0.01
-    least * 0.02
+    least * 0.005
 
 // The flattened subpaths of a path, as runs of points.
 fn flat_runs(path: svgpath.SvgPath, tol: Float) -> [svgpath.SvgSubpath]
@@ -330,8 +330,8 @@ fn arc_between(var out: [GeomPointF], c: GeomPointF, h: Float, a0: Float, sweep:
 // On the inside of the turn the offset curve passes through the vertex
 // itself, which the non-zero fill covers; on the outside the join
 // decides.
-fn add_join(var out: [GeomPointF], p: GeomPointF, d0: GeomVecF, d1: GeomVecF, h: Float,
-            style: RstStrokeStyle, tol: Float)
+fn add_join(var out: [GeomPointF], p: GeomPointF, d0: GeomVecF, d1: GeomVecF, run0: Float,
+            run1: Float, h: Float, style: RstStrokeStyle, tol: Float)
     let n0 = left_of(d0)
     let n1 = left_of(d1)
     let cross = d0.dx * d1.dy - d0.dy * d1.dx
@@ -342,6 +342,17 @@ fn add_join(var out: [GeomPointF], p: GeomPointF, d0: GeomVecF, d1: GeomVecF, h:
         list.push(out, a)
         return
     if cross > 0.0
+        // The two offset lines meet on the inside of the turn, at a
+        // distance `reach` back along each segment.  When both segments
+        // are at least that long the offset curve passes through the
+        // meeting point and nothing overlaps; when one is shorter it
+        // goes through the vertex instead, and the non-zero fill covers
+        // the overlap.
+        let reach = h * cross / (1.0 + dot)
+        if reach <= run0 and reach <= run1
+            let k = h / (1.0 + dot)
+            list.push(out, geompoint.ptf(p.x + (n0.dx + n1.dx) * k, p.y + (n0.dy + n1.dy) * k))
+            return
         list.push(out, a)
         list.push(out, p)
         list.push(out, b)
@@ -368,17 +379,20 @@ fn left_side(pts: [GeomPointF], closed: Bool, h: Float, style: RstStrokeStyle,
              tol: Float) -> [GeomPointF]
     let n = list.len(pts)
     var dirs: [GeomVecF] = []
+    var lens: [Float] = []
     for i in 0..n
         if closed or i < n - 1
             list.push(dirs, unit_toward(pts[i], pts[(i + 1) % n]))
+            list.push(lens, math.hypot(pts[(i + 1) % n].x - pts[i].x, pts[(i + 1) % n].y - pts[i].y))
     var out: [GeomPointF] = []
     if closed
         for i in 0..n
-            add_join(var out, pts[i], dirs[(i + n - 1) % n], dirs[i], h, style, tol)
+            add_join(var out, pts[i], dirs[(i + n - 1) % n], dirs[i], lens[(i + n - 1) % n], lens[i], h,
+                     style, tol)
         return out
     list.push(out, moved(pts[0], left_of(dirs[0]), h))
     for i in 1..n - 1
-        add_join(var out, pts[i], dirs[i - 1], dirs[i], h, style, tol)
+        add_join(var out, pts[i], dirs[i - 1], dirs[i], lens[i - 1], lens[i], h, style, tol)
     list.push(out, moved(pts[n - 1], left_of(dirs[n - 2]), h))
     out
 
