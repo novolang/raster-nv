@@ -5,6 +5,66 @@ All notable changes to raster-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-10-29
+
+The first implementation of the interface published as 0.0.3: every function
+has a body. The package is measured against cairo, pixman, FreeType and numpy,
+and the line coverage over `src/` is 100%.
+
+### Breaking
+
+These break code written against 0.0.x, or settle what the 0.0.x comments left
+open.
+
+- `rasterpaint.blend_over` and every blend mode work on the stored values,
+  premultiplied, as cairo, pixman and tiny-skia do. The 0.0.x comment said
+  `colormix.over` was the same operation. `colormix.over` blends in linear
+  light, so the two differ wherever a pixel is partly covered or partly
+  transparent.
+- `RstSrcIn` and `RstSrcOut` are the Porter-Duff operators of those names, the
+  source scaled by the destination's opacity and by its transparency. The 0.0.x
+  comments described the destination operators under these names.
+- `rastermask.same_extent` compares the origin as well as the size, and the
+  combinations refuse two masks at different origins with `RstExtentMismatch`.
+- `rastermask.mask` and `rastermask.full` panic for a width or a height below 1.
+- `rasterfill.fill_convex` fills with the non-zero rule through the same sweep
+  as `fill`. The answer is what `fill` gives for the same ring.
+- `rasterstroke.hairline()` is a style with a negative width. `outline` and
+  `stroked_bounds` treat it as one path unit wide, and `rasterdraw.stroke_path`
+  as one pixel wide after the transform.
+- `rasterstroke.stroke_contains` builds the outline and tests it, so dashes, caps
+  and joins are the drawn ones.
+- A dash pattern with a negative entry, a NaN or an infinity is refused with
+  `RstBadDash`, and so is a pattern that would cut a path into more than 4194304
+  pieces. A pattern of odd length is used twice over. The pattern starts again at
+  every subpath.
+- A gradient without stops draws nothing, and `rasterpaint.color_at` answers
+  transparent for it.
+- `rasterpaint.transformed` moves a radial gradient's radius by the square root of
+  the area scale of the matrix. It is exact for a rotation, a shift, a uniform
+  scale and a mirror.
+- `rasterdraw.clear` to a colour with no alpha keeps the colour it was given.
+- `rasterglyph` draws a cached glyph at the left edge of its subpixel column, so a
+  pen on a whole pixel is exact. `draw_run` keys a glyph on the scale's horizontal
+  factor in 65536ths and draws the glyphs that have an outline when a run has more
+  glyphs than outlines.
+
+### Added
+
+- `rasterpaint.blend_packed`, one blend of two pixels held as integers, with a
+  coverage.
+- `rasterpaint.ramp_position` and `rasterpaint.ramp_packed`, the position of a
+  point on a paint's ramp and the ramp as a table of packed colours.
+- `tests/oracle` holds the scripts that compare fills, strokes, gradients, blend
+  modes, Oklab ramps and glyph masks with cairo, FreeType and published formulas,
+  and `tests/coverage.sh` measures the merged line coverage over `src/`.
+
+### Changed
+
+- The dependency ranges move to `image-nv ^0.1.0` and `font-nv ^0.1.0`, and the
+  package asks for novo 0.20.2 or later, which font-nv asks for.
+- `stability` is `experimental` and the release is no longer an interface release.
+
 ## 0.0.3 — 2026-09-28
 
 The dependency ranges move to the dependencies' current releases.  A

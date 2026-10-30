@@ -100,7 +100,8 @@ pub fn default_limits() -> RstLimits []
 // A mask of `width` by `height` at an origin, fully transparent.
 //
 // `RstTooLarge` when the size is past the budget, which is the check
-// every mask-producing call in this package makes first.
+// every mask-producing call in this package makes first.  A width or a
+// height below 1 is a mistake in the caller's arithmetic and panics.
 pub fn mask(width: Int, height: Int, origin_x: Int, origin_y: Int,
             limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
     build(width, height, origin_x, origin_y, 0, limits)
@@ -165,7 +166,8 @@ pub fn row(m: RstMask, y: Int) -> ?Bytes []
         return None
     Some(bytes.slice(m.coverage, y * m.width, (y + 1) * m.width))
 
-// Whether two masks cover the same rectangle.
+// Whether two masks cover the same rectangle: the same size at the
+// same origin.
 //
 // The check `intersect`, `union` and `subtract` all make, published
 // because a caller that combines masks in a loop would rather ask once

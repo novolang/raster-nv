@@ -17,6 +17,11 @@
 // place the interpolation lives.  A package that hard-coded sRGB would
 // be a package every serious caller works around.
 //
+// BLENDING IS ON THE ENCODED VALUES, as cairo, pixman and tiny-skia do
+// it: a half-covered black edge on white is 127, the number the file
+// stores, and not the 188 that averaging light would give.
+// `colormix.over` blends in linear light and is not this operation.
+//
 // AND ALPHA IS NOT PREMULTIPLIED ON THE WAY IN.  color-nv's `Srgba8`
 // stores unassociated alpha because PNG and QOI do; compositing needs
 // premultiplied, and `colormix.premultiply` is the conversion.  Doing
@@ -47,10 +52,12 @@ pub enum RstBlend
     // clearing a region wants, and the only mode that can REMOVE
     // opacity.
     RstSrcCopy
-    // Keep the destination only where the source covers it.  The
-    // masking mode.
+    // The source where the destination is: the Porter-Duff operator of
+    // that name.  The colour of the source with the opacity of the
+    // destination, scaled by the source's own.
     RstSrcIn
-    // Keep the destination only where the source does NOT cover it.
+    // The source where the destination is not: the source scaled by
+    // the destination's transparency.
     RstSrcOut
     // Add the two, clamped.  What light does, and what a glow wants.
     RstPlus
@@ -241,6 +248,14 @@ pub fn is_usable(p: RstPaint) -> Bool []
 // applies only to the paint, and a package with one transform could
 // not express it.
 //
+// The answer is exact for a rotation, a shift, a uniform scale and a
+// mirror, which keep a circle a circle and a gradient's lines at right
+// angles to its axis.  Another matrix moves a linear gradient's two
+// points and a radial gradient's centre, and scales a radius by the
+// square root of the area scale; the compositing loop does not use
+// this, it maps each pixel back through the paint transform instead,
+// which is exact for every matrix.
+//
 // `RstSingularTransform` when the matrix collapses the plane.
 pub fn transformed(p: RstPaint, t: geomxform.GeomXform) -> Result<RstPaint, rastererror.RstFault> []
     if not geomxform.is_invertible(t)
@@ -267,9 +282,11 @@ pub fn transformed(p: RstPaint, t: geomxform.GeomXform) -> Result<RstPaint, rast
 // The source-over blend of two pixels, which is `RstOver` at one
 // pixel.
 //
-// `colormix.over` is the same operation in color-nv, and this names it
-// here so the composite loop's definition is one call rather than a
-// paragraph. The two agreeing is a test.
+// `colormix.over` is the same Porter-Duff operator in color-nv, done in
+// linear light; this one is done on the encoded values, which is what
+// a compositing loop over 8-bit pixels does and what cairo answers, so
+// the two differ wherever a pixel is partly covered or partly
+// transparent.
 pub fn blend_over(src: srgb.Srgba8, dst: srgb.Srgba8) -> srgb.Srgba8 []
     blend(RstOver, src, dst)
 
@@ -372,11 +389,13 @@ pub fn modes_supported() -> [RstBlend] []
     [RstOver, RstSrcCopy, RstSrcIn, RstSrcOut, RstPlus, RstMultiply, RstScreen, RstOverlay,
      RstDarken, RstLighten, RstDifference]
 
-// The name of a blend mode, in CSS's spelling.
+// The name of a blend mode: `source-over`, `copy`, `source-in`,
+// `source-out`, `plus-lighter`, and CSS's own `multiply`, `screen`,
+// `overlay`, `darken`, `lighten` and `difference`.
 //
-// `source-over`, `multiply`, `screen` and the rest, so a caller
-// reading an SVG's `mix-blend-mode` can match on the string it found
-// rather than writing the table a second time.
+// So a caller reading a canvas operation or an SVG `mix-blend-mode`
+// can match on the string it found rather than writing the table a
+// second time.
 pub fn mode_name(mode: RstBlend) -> Str []
     match mode
         RstOver       => "source-over"

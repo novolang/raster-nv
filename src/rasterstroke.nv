@@ -85,7 +85,8 @@ pub struct RstStrokeStyle
     // The dash pattern: alternating on and off lengths, in path units.
     // Empty means a solid line.
     dash: [Float]
-    // How far into the pattern the first subpath starts.
+    // How far into the pattern each subpath starts.  The pattern begins
+    // again at the start of every subpath.
     dash_offset: Float
 
 // A solid stroke of a given width: round joins, butt caps, SVG's miter
@@ -98,7 +99,8 @@ pub fn solid(width: Float) -> RstStrokeStyle []
     RstStrokeStyle { width: width, join: RstRound, cap: RstButt, miter_limit: 4.0, dash: [],
                      dash_offset: 0.0 }
 
-// A hairline: the thinnest stroke that draws at all.
+// A hairline: the thinnest stroke that draws at all.  It is held as a
+// negative width, which no other stroke has.
 //
 // THE CASE WITH NO OBVIOUS ANSWER, ANSWERED BY NAME.  A width of 0 in
 // SVG means "draw nothing"; a width of 0 in PostScript and in most
@@ -138,11 +140,21 @@ pub fn fill_rule() -> GeomFillRule []
 //
 // `RstBadDash` when the style's dash pattern cannot advance.
 //
-// ```novo ignore
-// let ink = rasterstroke.outline(path, rasterstroke.solid(2.0))!
-// let m   = rasterfill.fill(ink, xform, clip, rasterstroke.fill_rule(),
-//                           rasterfill.default_flatten(),
-//                           rastermask.default_limits())!
+// ```novo
+// use geomrect
+// use geomxform
+// use rastermask
+// use rasterfill
+// use rasterstroke
+// use svgpath
+//
+// fn main() [io]
+//     let line = svgpath.line_to(svgpath.move_to(svgpath.empty(), 0.0, 2.0), 4.0, 2.0)
+//     let ink = rasterstroke.outline(line, rasterstroke.solid(2.0))!
+//     let m = rasterfill.fill(ink, geomxform.identity(), geomrect.of_xywh_i(0, 0, 4, 4),
+//                             rasterstroke.fill_rule(), rasterfill.default_flatten(),
+//                             rastermask.default_limits())!
+//     println("${rastermask.at(m, 1, 1)} ${rastermask.at(m, 1, 3)}")      // 255 0
 // ```
 pub fn outline(path: svgpath.SvgPath,
                style: RstStrokeStyle) -> Result<svgpath.SvgPath, rastererror.RstFault> []
@@ -155,8 +167,13 @@ pub fn outline(path: svgpath.SvgPath,
 // path-length measurement both need — and so the two compose in the
 // order the specification says: dash first, then stroke.
 //
-// `RstBadDash` when the pattern is empty or sums to zero, because the
-// loop that walks it would not terminate.
+// A pattern of an odd length is used twice over, as SVG says.  A dash
+// of no length is a point, which a round cap makes a dot of.  A closed
+// subpath is cut like an open one that ends where it began.
+//
+// `RstBadDash` when the pattern is empty, has a negative entry or sums
+// to zero, because the loop that walks it would not terminate, and when
+// it would cut the path into millions of pieces.
 pub fn dash(path: svgpath.SvgPath, pattern: [Float],
             offset: Float) -> Result<svgpath.SvgPath, rastererror.RstFault> []
     dash_at(path, pattern, offset, dash_tolerance(pattern))
@@ -222,9 +239,9 @@ pub fn miter_becomes_bevel(angle_radians: Float, limit: Float) -> Bool []
 // Whether a point is inside the stroke.
 //
 // Hit testing a LINE, which is what an editor selecting a thin path
-// needs and what filling the outline and testing that would answer far
-// more slowly. Distance to the nearest segment against half the width,
-// with the caps and joins accounted for.
+// needs.  It builds the outline and asks for the winding number there,
+// so the caps, the joins and the dashes are the ones that are drawn.
+// The point is in the path's own coordinates.
 pub fn stroke_contains(path: svgpath.SvgPath, style: RstStrokeStyle, at_x: Float,
                        at_y: Float) -> Bool []
     match outline_at(path, s_or_unit(style), default_tolerance(style))

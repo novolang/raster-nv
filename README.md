@@ -16,12 +16,6 @@ It is built on
 [image-nv](https://novo-lang.org/packages/image-nv) and
 [font-nv](https://novo-lang.org/packages/font-nv).
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What it is
 
 A rasteriser's real output is the answer to one question per pixel: how
@@ -84,7 +78,14 @@ what it does outside its own span — pad, repeat, or reflect.
 A **blend mode** says how the source colour is combined with what is
 already in the image. Eleven are offered: source-over, source-copy,
 source-in, source-out, plus, multiply, screen, overlay, darken, lighten
-and difference.
+and difference. Source-in and source-out are the Porter-Duff operators
+of those names. The others are the separable blend functions of the W3C
+Compositing and Blending specification, and plus adds the two and clamps.
+
+Blending is done on the stored values, premultiplied, as cairo, pixman
+and tiny-skia do it. A pixel half covered by black on white is 127.
+Blending in linear light would give 188, which is what color-nv's
+`colormix.over` does.
 
 | Quantity | Value |
 | --- | --- |
@@ -111,40 +112,44 @@ novo pkg add raster-nv
 
 ## Example
 
-A filled bar, its outline, and a text label, drawn into an image the
-caller allocated.
+A filled and outlined rectangle drawn into an image the program
+allocated, and the blue channel of two pixels read back. The program
+prints `255 127`.
 
-```novo ignore
+```novo
+use geomrect
+use geomxform
+use image
+use srgb
+use svgpath
 use rasterdraw
-use rasterglyph
 use rasterpaint
 use rasterstroke
 
-fn draw_bar(img: Image, bar: SvgPath, label: FontShaped, outlines: [SvgPath],
-            cache: RstGlyphCache, scale: GeomXform) -> Result<(Image, RstGlyphCache), RstFault>
-    // Clip to the whole image, source-over, the default budgets.
-    let o = rasterdraw.opts(img.width, img.height)
+fn main() [io]
+    // A white image 16 pixels across and 8 high. The package never holds it.
+    let img = image.filled(16, 8, PixRgba8, srgb.opaque(srgb.white()))
 
-    // The fill. The caller's image goes in and comes back.
-    var out = rasterdraw.fill_path(img, bar, rasterpaint.solid(blue),
-                                   GeomNonZero, GeomXform.identity(), o)!
+    // The clip is the whole image, the blend is source-over, the budgets are the defaults.
+    let o = rasterdraw.opts(16, 8)
 
-    // The same bar's outline, one unit wide.
-    out = rasterdraw.stroke_path(out, bar, rasterpaint.solid(navy),
-                                 rasterstroke.solid(1.0), GeomXform.identity(), o)!
+    // A rectangle from (2, 1) to (13.5, 6), as a path.
+    let bar = svgpath.of_rect(geomrect.of_xywh(2.0, 1.0, 11.5, 5.0), 0.0, 0.0)
 
-    // The label, through the glyph cache, in one pass over the run.
-    rasterglyph.draw_run(out, cache, label, outlines, scale, 0,
-                         12.0, 40.0, rasterpaint.solid(black), o)
+    // The fill. The image goes in and a new one comes back.
+    let blue = srgb.rgb8(0, 0, 255)
+    let filled = rasterdraw.fill_path(img, bar, rasterpaint.solid(blue), GeomNonZero,
+                                      geomxform.identity(), o)!
+
+    // The outline, one unit wide, in black.
+    let outlined = rasterdraw.stroke_path(filled, bar, rasterpaint.solid(srgb.black()),
+                                          rasterstroke.solid(1.0), geomxform.identity(), o)!
+
+    // The middle is blue, and a pixel on the edge is half way to black.
+    let middle = image.pixel(outlined, 7, 3) ?? srgb.transparent()
+    let edge = image.pixel(outlined, 2, 3) ?? srgb.transparent()
+    println("${middle.rgb.b} ${edge.rgb.b}")
 ```
-
-This program is marked `ignore` because it needs the bodies this
-release does not have: running it reaches a `todo()` and panics.
-
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: raster-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
 
 ## What the package contains
 
@@ -153,7 +158,7 @@ specification the implementation will have to satisfy.
 | `rastermask` | The coverage mask, its budget, reading it, combining two of them, and turning one into a bit per pixel. |
 | `rasterfill` | The scanline sweep: a path and a transform in, a coverage mask out. Also the flattening settings, a bounding box, an edge count, and a point-in-path test. |
 | `rasterstroke` | Joins, caps and the stroke style; the outline of a stroke as a path; dashing as a path; and the arithmetic for a miter. |
-| `rasterpaint` | The four paints, the eleven blend modes, the gradient spread, the colour at a point, and the blend itself. |
+| `rasterpaint` | The four paints, the eleven blend modes, the gradient spread, the colour at a point, and the blend itself on one pixel or on one packed integer. |
 | `rasterdraw` | Compositing a mask into an image, and the four calls a renderer makes: fill a path, stroke a path, fill a rectangle, draw an image. Also the conversions between a mask and a greyscale image. |
 | `rasterglyph` | A glyph cache the caller holds, keyed on integers, holding masks rather than pixels; rasterising one glyph; and drawing a whole shaped run. |
 | `rastererror` | The six things a rasteriser refuses, and a line a person can read. |
@@ -274,7 +279,27 @@ winding accumulation.
 22. **`rasterdraw.draw_image` is nearest-neighbour at whole-pixel
     offsets.** Scaling and rotating an image is resampling, which
     image-nv does.
-23. **One bit per pixel is a threshold and a packing.**
+23. **Blending is on the stored values.** A pixel half covered by black
+    on white is 127. `rasterpaint.blend_packed` takes a pixel as one
+    integer, red in the highest byte and alpha in the lowest, and a
+    coverage from 0 to 255, so a loop over a million pixels allocates
+    nothing.
+24. **A cached glyph is drawn at the left edge of its subpixel column.**
+    A pen on a whole pixel is exact, and the others are at most a third
+    of a pixel to the left of where they belong. The size in the key of
+    a glyph drawn by `draw_run` is the scale's horizontal factor in
+    65536ths, since a run carries font units and no em.
+25. **A subpath of one point is a mark or nothing.** A round cap draws
+    a disc, a square cap draws a square, and a butt cap draws nothing.
+    A closed subpath of two points is a line with a join at each end.
+26. **A dash pattern starts again at every subpath.** An odd pattern is
+    used twice over, as SVG says, and a negative entry is refused.
+27. **A gradient is sampled at the centre of each pixel**, in the
+    paint's own coordinates, through the inverse of the paint transform.
+    That is exact for every matrix. `rasterpaint.transformed` moves a
+    paint exactly only for a rotation, a shift, a uniform scale and a
+    mirror.
+28. **One bit per pixel is a threshold and a packing.**
     `rastermask.threshold` turns coverage into 0 or 255 and
     `rastermask.pack_rows_1bit` packs the result eight pixels to a
     byte, most significant bit leftmost, which is what a monochrome
@@ -292,6 +317,10 @@ winding accumulation.
   approximating it with a concentric gradient is a visible difference a
   caller cannot see coming, so it is absent rather than wrong.
 - **16-bit destinations.** See rule 21.
+- **Blending in linear light.** color-nv's `colormix.over` does it. See
+  rule 23.
+- **Joining a dash across the start of a closed subpath.** The first
+  and the last dash of a closed subpath each end in a cap.
 - **Hinting and stem darkening.** Hinting belongs with the font.
   Stem darkening is a decision about a caller's whole pipeline, and
   `rastermask.scale` is where a caller that wants it applies it.
@@ -348,50 +377,44 @@ rather than two.
 ## Tests
 
 ```bash
-novo test --isolate tests/rastermask_tests.nv     #  9 tests: the mask and its budget
-novo test --isolate tests/rasterfill_tests.nv     #  7 tests: the sweep and the fill rules
-novo test --isolate tests/rastersurface_tests.nv  # 10 tests: strokes, paints and the options
-novo test --isolate tests/rasterdraw_tests.nv     # 11 tests: compositing and the glyphs
+novo test --isolate tests/rastermask_tests.nv     # the mask, its budget and its arithmetic
+novo test --isolate tests/rastererror_tests.nv    # the six refusals
+novo test --isolate tests/rasterfill_tests.nv     # the sweep and the fill rules
+novo test --isolate tests/rasterstroke_tests.nv   # joins, caps, dashes and bounds
+novo test --isolate tests/rasterpaint_tests.nv    # gradients and blend modes
+novo test --isolate tests/rasterdraw_tests.nv     # compositing, clear, images
+novo test --isolate tests/rasterglyph_tests.nv    # the glyph cache and runs
+bash tests/coverage.sh                            # the line coverage over src/
+bash tests/oracle/compare.sh                      # the comparison with cairo and FreeType
 ```
 
-The behaviour asserted comes from SVG 2 for the fill rules, the joins,
-the caps, the dash order and the miter limit, from CSS Color 4 for the
-Oklab interpolation, and from tiny-skia for the mask and clip shapes.
+The coverage plane of a fill is checked against a model that clips the
+finely flattened outline against each pixel and sums the signed areas,
+and against FreeType's smooth rasteriser. Strokes, gradients, blend
+modes and a filled path over a background are checked against cairo with
+pixman. Oklab ramps are checked against the formulas Bjorn Ottosson
+published, glyph masks against FreeType on installed fonts, and the mask
+arithmetic against numpy. `tests/oracle/vectors.py` prints the expected
+values the suites embed, and `tests/oracle/compare.sh` runs the wider
+comparison and prints the largest difference of each scenario.
 
 `rasterfill_tests.nv` asserts the claim the package is built on: that a
-half-covered pixel is exactly 128. It also uses a five-pointed star,
-which is the shape where the two fill rules disagree, checks that the
-rectangle fast path answers what the sweep would, and that a collapsing
-transform is refused rather than drawn as nothing.
-`rastermask_tests.nv` asserts that the size is checked before anything
-is allocated, that a clip is a minimum and not a multiply, that two
-masks of different sizes refuse rather than guess, and that the pixel
-box is rounded outward. `rastersurface_tests.nv` asserts that a
-stroke's fill rule is not a choice, that the zero-width case is
-answered by name, that dashing composes with stroking, and that a
-gradient interpolates in Oklab unless asked otherwise.
-`rasterdraw_tests.nv` asserts that the caller gets its image back, that
-the options are a value so a clip cannot be left set, and that a glyph
-taken from the cache hands the cache back.
+half-covered pixel is 128. It also uses a five-pointed star, which is
+the shape where the two fill rules disagree, checks that the rectangle
+fast path answers what the sweep would, and that a collapsing transform
+is refused rather than drawn as nothing. `rastermask_tests.nv` asserts
+that the size is checked before anything is allocated, that a clip is a
+minimum and not a multiply, that two masks of different rectangles
+refuse rather than guess, and that the pixel box is rounded outward.
+`rasterstroke_tests.nv` asserts that a stroke is a path, that dashing
+composes with stroking, and that a miter beyond the limit is a bevel.
+`rasterpaint_tests.nv` asserts that a gradient interpolates in Oklab
+unless asked otherwise. `rasterdraw_tests.nv` asserts that the caller
+gets its image back and that the options are a value, so a clip cannot
+be left set. `rasterglyph_tests.nv` asserts that a glyph taken from the
+cache hands the cache back.
 
-The tests compile today and fail at run, each on the
-`not implemented: raster-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-Nothing is implemented. Every function below is a `todo()`.
-
-| Module | Public surface |
-| --- | --- |
-| `rastermask` | `default_limits`, `mask`, `full`, `extent_for`, `cost_of`, `at`, `extent`, `row`, `same_extent`, `is_empty`, `is_opaque`, `ink_extent`, `intersect`, `union`, `subtract`, `invert`, `scale`, `retarget`, `threshold`, `pack_rows_1bit`, `packed_1bit_len` |
-| `rasterfill` | `default_flatten`, `exact_coverage_is_claimed`, `fill`, `fill_all`, `fill_rect`, `fill_convex`, `pixel_bounds`, `edge_count`, `flatten_path`, `contains`, `winding_at` |
-| `rasterstroke` | `solid`, `hairline`, `is_hairline`, `fill_rule`, `outline`, `dash`, `dash_is_usable`, `stroked_bounds`, `miter_extent`, `miter_becomes_bevel`, `stroke_contains` |
-| `rasterpaint` | `solid`, `solid_alpha`, `linear`, `radial`, `default_space`, `is_solid`, `is_opaque`, `color_at`, `parameter_at`, `stops_of`, `is_usable`, `transformed`, `blend_over`, `blend`, `reduces_alpha`, `modes_supported`, `mode_name` |
-| `rasterdraw` | `opts`, `opts_at`, `with_clip`, `with_blend`, `kinds_supported`, `can_draw_into`, `composite`, `fill_path`, `stroke_path`, `fill_rect`, `clear`, `draw_image`, `mask_to_image`, `image_to_mask` |
-| `rasterglyph` | `subpixel_steps`, `cache`, `key_for`, `cached_count`, `is_cached`, `cached`, `cleared`, `cache_bytes`, `rasterize`, `rasterize_cached`, `draw_glyph`, `draw_run`, `run_is_consistent`, `run_mask`, `run_bounds` |
-| `rastererror` | `describe`, `is_budget`, and `RstFault`'s `message` |
+The line coverage over `src/` is 100%.
 
 ## Licence
 

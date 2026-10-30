@@ -86,11 +86,19 @@ pub fn exact_coverage_is_claimed() -> Bool []
 // past `limits.max_pixels`; `RstSingularTransform` when `xform`
 // collapses the plane.
 //
-// ```novo ignore
-// let m = rasterfill.fill(path, xform, clip,
-//                         GeomNonZero,
-//                         rasterfill.default_flatten(),
-//                         rastermask.default_limits())!
+// ```novo
+// use geomrect
+// use geomxform
+// use rastermask
+// use rasterfill
+// use svgpath
+//
+// fn main() [io]
+//     let box = svgpath.of_rect(geomrect.of_xywh(0.5, 0.0, 2.0, 1.0), 0.0, 0.0)
+//     let m = rasterfill.fill(box, geomxform.identity(), geomrect.of_xywh_i(0, 0, 4, 1),
+//                             GeomNonZero, rasterfill.default_flatten(),
+//                             rastermask.default_limits())!
+//     println("${rastermask.at(m, 0, 0)} ${rastermask.at(m, 1, 0)}")      // 128 255
 // ```
 pub fn fill(path: svgpath.SvgPath, xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
             rule: GeomFillRule, flatten: RstFlatten,
@@ -136,12 +144,12 @@ pub fn fill_rect(r: geomrect.GeomRectF, clip: geomrect.GeomRectI,
     Ok(RstMask { width: m.width, height: m.height, origin_x: m.origin_x, origin_y: m.origin_y,
                  coverage: buf })
 
-// Rasterise a convex polygon, which needs no winding accumulation.
+// Rasterise a convex polygon.
 //
-// The second fast path: a convex ring has exactly two active edges on
-// every scanline, so the sweep is a pair of x positions per row and
-// the fill rule cannot change the answer.  `geompoly.is_convex` is the
-// check a caller makes to decide.
+// A convex ring has exactly two active edges on every scanline, so the
+// fill rule cannot change the answer, and this fills with non-zero.
+// The answer is what `fill` gives for the same ring.  `geompoly.is_convex`
+// is the check a caller makes to decide.
 pub fn fill_convex(p: geompoly.GeomPoly, xform: geomxform.GeomXform, clip: geomrect.GeomRectI,
                    limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
     fill_set([svgpath.of_points(geompoly.points_of(p), true)], xform, clip, GeomNonZero,

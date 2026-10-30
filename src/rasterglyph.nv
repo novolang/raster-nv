@@ -120,7 +120,9 @@ pub fn cache(capacity: Int) -> RstGlyphCache []
 //
 // The fractional part of `pen_x` is what picks the subpixel column,
 // which is the arithmetic a caller would otherwise have to get right
-// and would round away.
+// and would round away.  A cached glyph is drawn at the left edge of
+// its column, so a pen on a whole pixel is exact and the others are at
+// most a third of a pixel to the left of where they belong.
 pub fn key_for(glyph: Int, font_id: Int, px: Float, pen_x: Float) -> RstGlyphKey []
     RstGlyphKey { glyph: glyph, size_64: math.round(px * 64.0) as Int, subpixel_x: column_of(pen_x),
                   font_id: font_id }
@@ -185,7 +187,8 @@ pub fn rasterize(outline: svgpath.SvgPath, scale: geomxform.GeomXform, pen_x: Fl
 //
 // The call a text renderer makes per character.  Both values come
 // back, because the cache is the caller's and a function that mutated
-// one would be a function this package could not have.
+// one would be a function this package could not have.  A cache of no
+// capacity holds nothing and still answers the glyph.
 pub fn rasterize_cached(c: RstGlyphCache, k: RstGlyphKey, outline: svgpath.SvgPath,
                         scale: geomxform.GeomXform, advance_64: Int, flatten: rasterfill.RstFlatten,
                         limits: rastermask.RstLimits) -> Result<(RstGlyphCache, RstGlyphImage), rastererror.RstFault> []
@@ -228,8 +231,11 @@ pub fn draw_glyph(img: Image, g: RstGlyphImage, pen_x: Float, baseline_y: Float,
 // `RstExtentMismatch` is not what a mismatch answers: it is a
 // `FontComponentMissing`-shaped mistake the caller made, and
 // `run_is_consistent` is the check published so it can be made once.
+// A run with more glyphs than outlines draws the glyphs that have one.
 //
-// The cache comes back with whatever was added.
+// The cache comes back with whatever was added.  The size in a glyph's
+// key is the scale's horizontal factor in 1/65536ths, since a run
+// carries font units and no em.
 pub fn draw_run(img: Image, c: RstGlyphCache, run: fontshape.FontShaped,
                 outlines: [svgpath.SvgPath], scale: geomxform.GeomXform, font_id: Int, pen_x: Float,
                 baseline_y: Float, paint: rasterpaint.RstPaint,

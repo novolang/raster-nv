@@ -35,7 +35,8 @@ pub enum RstFault
     // composed it out of several transforms and the one that collapsed
     // is a bug worth being told about.
     RstSingularTransform
-    // Two masks were combined whose rectangles are different sizes.
+    // Two masks were combined whose rectangles are different, in size
+    // or in origin.  The error carries the two sizes.
     //
     // A clip and a fill have to be measured over the same pixels or
     // the intersection means nothing; `rastermask.same_extent` is the
@@ -49,8 +50,10 @@ pub enum RstFault
     // is fine; this is a gradient whose parameter `t` is undefined at
     // every point.
     RstDegenerateGradient
-    // A dash pattern that cannot advance: empty, or every entry zero
-    // or negative.
+    // A dash pattern that cannot advance: empty, with an entry that is
+    // negative or not a number, or with every entry zero.  Also a
+    // pattern that would cut a path into more pieces than one call
+    // will hold.
     //
     // A dashing loop over one of those does not terminate, which is
     // the difference between this and the cases above.

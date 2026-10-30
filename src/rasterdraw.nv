@@ -136,9 +136,21 @@ pub fn composite(img: Image, m: rastermask.RstMask, paint: rasterpaint.RstPaint,
 // `rasterfill.fill` then `composite`.  The transform maps the path's
 // coordinates to pixels; the paint's own transform is in `opts`.
 //
-// ```novo ignore
-// img = rasterdraw.fill_path(img, bar, rasterpaint.solid(blue),
-//                            GeomNonZero, xform, rasterdraw.opts(w, h))!
+// ```novo
+// use geomrect
+// use geomxform
+// use image
+// use srgb
+// use svgpath
+// use rasterdraw
+// use rasterpaint
+//
+// fn main() [io]
+//     let img = image.new(4, 2, PixRgba8)
+//     let bar = svgpath.of_rect(geomrect.of_xywh(0.0, 0.0, 2.0, 2.0), 0.0, 0.0)
+//     let out = rasterdraw.fill_path(img, bar, rasterpaint.solid(srgb.rgb8(0, 0, 255)),
+//                                    GeomNonZero, geomxform.identity(), rasterdraw.opts(4, 2))!
+//     println("${(image.pixel(out, 1, 1) ?? srgb.transparent()).rgb.b}")   // 255
 // ```
 pub fn fill_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint, rule: GeomFillRule,
                  xform: geomxform.GeomXform,
@@ -155,6 +167,10 @@ pub fn fill_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint,
 // `rasterstroke.fill_rule` names, then `composite`.  The rule is not a
 // parameter here, because there is only one right answer and offering
 // the other would be offering a picture with holes in it.
+//
+// A hairline is one pixel wide after the transform: its width in the
+// path's units is the reciprocal of the transform's scale, the square
+// root of the area it gives a unit square.
 pub fn stroke_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint,
                    style: rasterstroke.RstStrokeStyle, xform: geomxform.GeomXform,
                    o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
@@ -192,7 +208,7 @@ pub fn fill_rect(img: Image, r: geomrect.GeomRectF, paint: rasterpaint.RstPaint,
     composite(img, mask, paint, o)
 
 // Fill the whole clip rectangle with one colour, ignoring the blend
-// mode.
+// mode.  The shaped clip, when there is one, still says how far.
 //
 // The clear.  Separate from `fill_rect` with an opaque paint because
 // it REPLACES rather than blends — a caller clearing to transparent
