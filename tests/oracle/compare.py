@@ -467,7 +467,63 @@ def check_glyph(probe):
     return failures
 
 
-CHECKS = {'fill': check_fill, 'stroke': check_stroke, 'paint': check_paint, 'blend': check_blend, 'oklab': check_oklab, 'glyph': check_glyph}
+# ---- cairo: a filled path over a background ----
+
+# name, W, H, background rgba, source rgba, operator, commands
+DRAW = [
+    ('over-opaque', 16, 16, (255, 255, 255, 255), (0, 0, 255, 255), 'source-over',
+     poly([(2.5, 2.25), (13.5, 3.75), (7.25, 14.5)])),
+    ('over-translucent', 16, 16, (250, 240, 30, 255), (0, 90, 200, 128), 'source-over',
+     poly([(1.5, 1.5), (14.25, 1.5), (14.25, 12.75), (1.5, 12.75)])),
+    ('over-on-transparent', 16, 16, (0, 0, 0, 0), (200, 20, 20, 200), 'source-over',
+     poly([(2, 2.5), (12.5, 3), (14, 13.5)])),
+    ('multiply', 16, 16, (250, 200, 100, 255), (60, 140, 255, 255), 'multiply',
+     poly([(2.25, 2), (13.75, 2.5), (8, 14.25)])),
+    ('screen-translucent', 16, 16, (20, 60, 100, 255), (220, 180, 40, 160), 'screen',
+     poly([(2, 3.5), (14, 3.5), (14, 11.5), (2, 11.5)])),
+    ('difference', 16, 16, (255, 255, 255, 255), (30, 150, 90, 255), 'difference',
+     poly([(3, 2), (13.5, 7.5), (3, 13)])),
+    ('copy', 16, 16, (255, 255, 255, 255), (30, 150, 90, 128), 'copy',
+     poly([(3.5, 2.5), (12.5, 2.5), (12.5, 13.25), (3.5, 13.25)])),
+]
+
+
+def check_draw(probe):
+    lines = ['%s %d %d %s %s %s nz %s' % (n, w, h, ' '.join(map(str, bg)), ' '.join(map(str, fg)), op,
+                                        path_tokens(cmds)) for (n, w, h, bg, fg, op, cmds) in DRAW]
+    got = parse(run_probe(probe, 'draw', '\n'.join(lines) + '\n'))
+    failures = 0
+    for (name, w, h, bg, fg, op, cmds) in DRAW:
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+        ctx = cairo.Context(surf)
+        ctx.set_operator(cairo.OPERATOR_SOURCE)
+        ctx.set_source_rgba(*[v / 255 for v in bg])
+        ctx.paint()
+        ctx.set_operator(OPERATORS[op])
+        ctx.set_source_rgba(*[v / 255 for v in fg])
+        trace(ctx, cmds)
+        ctx.fill()
+        surf.flush()
+        data = surf.get_data()
+        stride = surf.get_stride()
+        rows = got.get(name, [])
+        diffs = []
+        for y in range(h):
+            for x in range(w):
+                bb, gg, rr, aa = data[y * stride + x * 4:y * stride + x * 4 + 4]
+                ours = premultiplied(tuple(int(v) for v in rows[y][x].split(',')))
+                diffs.append(max(abs(p - q) for p, q in zip(ours, (rr, gg, bb, aa))))
+        worst, mean = max(diffs), sum(diffs) / len(diffs)
+        # Cairo's coverage is quantised to fifteen sub-scanlines, so an edge pixel
+        # can be off by up to 17 levels of coverage before the colour scales it.
+        ok = worst <= 10 and mean <= 0.5
+        failures += 0 if ok else 1
+        print('%s draw %-22s largest %3d (bound 10)  mean %.3f (bound 0.5)' % ('ok  ' if ok else 'FAIL', name, worst, mean))
+    print('draw: %d scenarios, %d past their bound' % (len(DRAW), failures))
+    return failures
+
+
+CHECKS = {'fill': check_fill, 'stroke': check_stroke, 'paint': check_paint, 'blend': check_blend, 'oklab': check_oklab, 'glyph': check_glyph, 'draw': check_draw}
 
 
 def main():

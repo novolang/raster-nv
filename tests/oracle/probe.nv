@@ -26,6 +26,8 @@ use fontdir
 use fontshape
 use fontmetric
 use rasterglyph
+use rasterdraw
+use image
 
 fn num(s: Str) -> Float
     str.to_float(s) ?? 0.0
@@ -152,7 +154,7 @@ fn run_stroke(t: [Str])
                                  dash: dashes, dash_offset: num(t[7]) }
     println("== ${t[0]}")
     match rasterstroke.outline(path_of(t, 9), style)
-        Err(e) => println("error")
+        Err(e)  => println("error")
         Ok(ink) =>
             match rasterfill.fill(ink, geomxform.identity(), geomrect.of_xywh_i(0, 0, w, h), GeomNonZero,
                                   RstFlatten { tolerance: 0.02, max_per_curve: 4096 },
@@ -188,6 +190,29 @@ fn run_glyph(t: [Str]) [io, fs]
                         row = row + "${rastermask.at(g.mask, g.mask.origin_x + x, g.mask.origin_y + y)} "
                     println(row)
 
+// name W H dr dg db da sr sg sb sa mode rule commands: a path filled in a colour
+// over a flat background, printed as r,g,b,a for every pixel.
+fn run_draw(t: [Str])
+    let w = whole(t[1])
+    let h = whole(t[2])
+    let bg = srgb.Srgba8 { rgb: srgb.rgb8(whole(t[3]), whole(t[4]), whole(t[5])), a: whole(t[6]) }
+    let fg = srgb.Srgba8 { rgb: srgb.rgb8(whole(t[7]), whole(t[8]), whole(t[9])), a: whole(t[10]) }
+    var rule = GeomNonZero
+    if t[12] == "eo"
+        rule = GeomEvenOdd
+    let o = rasterdraw.with_blend(rasterdraw.opts(w, h), mode_of(t[11]))
+    let img = image.filled(w, h, PixRgba8, bg)
+    println("== ${t[0]}")
+    match rasterdraw.fill_path(img, path_of(t, 13), rasterpaint.solid_alpha(fg), rule, geomxform.identity(), o)
+        Err(e)  => println("error")
+        Ok(out) =>
+            for y in 0..h
+                var row = ""
+                for x in 0..w
+                    let c = image.pixel(out, x, y) ?? srgb.transparent()
+                    row = row + "${c.rgb.r},${c.rgb.g},${c.rgb.b},${c.a} "
+                println(row)
+
 fn main() [io, fs]
     let args = env.user_args()
     if args[0] == "glyph"
@@ -203,5 +228,7 @@ fn main() [io, fs]
                 run_paint(t)
             elif args[0] == "stroke"
                 run_stroke(t)
+            elif args[0] == "draw"
+                run_draw(t)
         if list.len(t) == 10 and args[0] == "blend"
             run_blend(t)

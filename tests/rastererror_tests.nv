@@ -1,0 +1,33 @@
+// rastererror_tests.nv - six refusals, each with a line a person can read.
+
+use std.test
+use rastererror
+
+@test
+fn test_every_refusal_has_a_line_that_names_its_numbers() [io]
+    test.assert_eq_str(rastererror.describe(RstTooLarge(1000000000, 67108864)),
+                       "a mask of 1000000000 pixels is past the limit of 67108864")
+    test.assert_eq_str(rastererror.describe(RstSingularTransform),
+                       "the transform collapses the plane and cannot be inverted")
+    test.assert_eq_str(rastererror.describe(RstExtentMismatch(4, 5, 6, 7)),
+                       "two masks cover different rectangles: 4 by 5 and 6 by 7")
+    test.assert_eq_str(rastererror.describe(RstDegenerateGradient),
+                       "the gradient has no direction: its points coincide or its radius is not positive")
+    test.assert_eq_str(rastererror.describe(RstBadDash),
+                       "the dash pattern cannot advance: it is empty or has no positive length")
+    test.assert_eq_str(rastererror.describe(RstPixelKind("PixRgb16")),
+                       "the pixel kind PixRgb16 cannot be drawn into")
+
+@test
+fn test_only_a_size_is_a_budget() [io]
+    test.assert(rastererror.is_budget(RstTooLarge(2, 1)))
+    test.assert(rastererror.is_budget(RstSingularTransform) == false)
+    test.assert(rastererror.is_budget(RstExtentMismatch(1, 1, 2, 2)) == false)
+    test.assert(rastererror.is_budget(RstDegenerateGradient) == false)
+    test.assert(rastererror.is_budget(RstBadDash) == false)
+    test.assert(rastererror.is_budget(RstPixelKind("PixLuma16")) == false)
+
+@test
+fn test_the_error_trait_gives_the_same_line() [io]
+    let e: RstFault = RstSingularTransform
+    test.assert_eq_str(e.message(), rastererror.describe(e))

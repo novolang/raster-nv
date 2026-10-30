@@ -1,163 +1,514 @@
-// rasterfill_tests.nv — the sweep, the fill rule, and the pixel that
-// is exactly 128.
+// rasterfill_tests.nv - the sweep: a path in, a coverage mask out.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: raster-nv.<module>.<fn>`.
-//
-// THE ASSERTION THIS SUITE EXISTS FOR: a 45-degree edge through the
-// middle of a pixel covers exactly half of it, and the mask says 128 —
-// not "about 128".  That is the whole difference between analytic
-// coverage and supersampling, it is the claim
-// `rasterfill.exact_coverage_is_claimed` makes, and it is a claim only
-// a test can hold to.
-//
-// THE SECOND: a five-pointed star drawn in one stroke has a HOLLOW
-// middle under even-odd and a FILLED one under non-zero.  It is the
-// one shape where the two rules visibly disagree, it is the example
-// the SVG specification itself uses, and a rasteriser that got it
-// wrong would pass every test written with rectangles.
+// The coverage planes are checked against tests/oracle/exact.py, which clips
+// the finely flattened outline against each pixel and sums the signed areas;
+// it shares no algorithm with the scanline accumulation.  The fill rules,
+// the clip, the transform, the budgets and the hit tests are checked
+// against values worked out by hand.
 
 use std.test
-use geomrect
-use geomxform
+use std.bytes
+use std.list
 use geompoint
 use geompoly
+use geomrect
+use geomxform
 use svgpath
 use rastermask
 use rasterfill
+use rastererror
 
-fn unit_clip() -> geomrect.GeomRectI
-    geomrect.of_xywh_i(0, 0, 64, 64)
+fn lim() -> rastermask.RstLimits
+    rastermask.default_limits()
 
-// A right triangle whose hypotenuse runs at 45 degrees through the
-// centre of the pixel at (0, 0).
-fn half_pixel_triangle() -> svgpath.SvgPath
-    svgpath.close(svgpath.line_to(svgpath.line_to(
-        svgpath.move_to(svgpath.empty(), 0.0, 0.0), 1.0, 0.0),
-        0.0, 1.0))
+fn flat() -> RstFlatten
+    rasterfill.default_flatten()
 
-// A five-pointed star drawn as one self-crossing ring.
+fn fine() -> RstFlatten
+    RstFlatten { tolerance: 0.01, max_per_curve: 4096 }
+
+fn id() -> geomxform.GeomXform
+    geomxform.identity()
+
+fn grid(w: Int, h: Int) -> geomrect.GeomRectI
+    geomrect.of_xywh_i(0, 0, w, h)
+
+fn pts(ps: [GeomPointF]) -> svgpath.SvgPath
+    svgpath.of_points(ps, true)
+
+fn tri() -> svgpath.SvgPath
+    pts([geompoint.ptf(0.5, 0.5), geompoint.ptf(5.0, 1.0), geompoint.ptf(2.0, 4.5)])
+
+fn square(x0: Float, y0: Float, x1: Float, y1: Float) -> svgpath.SvgPath
+    pts([geompoint.ptf(x0, y0), geompoint.ptf(x1, y0), geompoint.ptf(x1, y1), geompoint.ptf(x0, y1)])
+
 fn star() -> svgpath.SvgPath
-    svgpath.of_points([geompoint.ptf(16.0, 2.0), geompoint.ptf(22.0, 26.0),
-                       geompoint.ptf(2.0, 11.0), geompoint.ptf(30.0, 11.0),
-                       geompoint.ptf(10.0, 26.0)],
-                       true)
+    var ps: [GeomPointF] = []
+    for i in 0..5
+        let a = -math.pi() / 2.0 + i as Float * 2.0 * math.pi() * 2.0 / 5.0
+        list.push(ps, geompoint.ptf(math.round((8.0 + 7.0 * math.cos(a)) * 1000.0) / 1000.0,
+                                    math.round((8.0 + 7.0 * math.sin(a)) * 1000.0) / 1000.0))
+    pts(ps)
+
+fn circle_path(cx: Float, cy: Float, r: Float, backwards: Bool) -> svgpath.SvgPath
+    let k = 0.5522847498 * r
+    var p = svgpath.move_to(svgpath.empty(), cx + r, cy)
+    if backwards
+        p = svgpath.cubic_to(p, cx + r, cy - k, cx + k, cy - r, cx, cy - r)
+        p = svgpath.cubic_to(p, cx - k, cy - r, cx - r, cy - k, cx - r, cy)
+        p = svgpath.cubic_to(p, cx - r, cy + k, cx - k, cy + r, cx, cy + r)
+        p = svgpath.cubic_to(p, cx + k, cy + r, cx + r, cy + k, cx + r, cy)
+    else
+        p = svgpath.cubic_to(p, cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+        p = svgpath.cubic_to(p, cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+        p = svgpath.cubic_to(p, cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+        p = svgpath.cubic_to(p, cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+    svgpath.close(p)
+
+fn joined(a: svgpath.SvgPath, b: svgpath.SvgPath) -> svgpath.SvgPath
+    var out = a
+    for cmd in svgpath.commands_of(b)
+        out = svgpath.push(out, cmd)
+    out
+
+fn unwrap(r: Result<rastermask.RstMask, rastererror.RstFault>) -> rastermask.RstMask
+    match r
+        Ok(m)  => m
+        Err(_) => RstMask { width: 1, height: 1, origin_x: -999, origin_y: -999, coverage: bytes.zeros(1) }
+
+fn fault_of(r: Result<rastermask.RstMask, rastererror.RstFault>) -> Str
+    match r
+        Ok(_)  => "no fault"
+        Err(e) => rastererror.describe(e)
+
+// The largest difference between a mask read over a w by h grid and the
+// hex of the expected plane.
+fn worst(m: rastermask.RstMask, w: Int, h: Int, want: Str) -> Int
+    let b = bytes.from_hex(want) ?? bytes.zeros(0)
+    var most = 0
+    for y in 0..h
+        for x in 0..w
+            most = math.max(most, math.abs_int(rastermask.at(m, x, y) - (bytes.byte_at(b, y * w + x) ?? 0)))
+    most
+
+// The whole plane of a mask over a w by h grid, as hex.
+fn plane(m: rastermask.RstMask, w: Int, h: Int) -> Str
+    var out = ""
+    for y in 0..h
+        for x in 0..w
+            out = out + bytes.to_hex(bytes.u8(rastermask.at(m, x, y)))
+    out
+
+fn total_coverage(m: rastermask.RstMask) -> Int
+    var total = 0
+    for i in 0..bytes.len(m.coverage)
+        total = total + (bytes.byte_at(m.coverage, i) ?? 0)
+    total
+
+fn want_triangle() -> Str
+    "000000000000000000000000004381430b000000000000000021fffffac6884a0f0000000000d4fffffffffffccd5300000088ffffffffffffc60b0000003cffffffffffd2120000000003ecffffffdd19000000000000a4ffffe6220000000000000058ffed2d000000000000000010ef39000000000000000000002700000000000000000000000000000000000000"
+
+fn want_diagonal() -> Str
+    "ffffffffffffff80ffffffffffff8000ffffffffff800000ffffffff80000000ffffff8000000000ffff800000000000ff800000000000008000000000000000"
+
+fn want_rect() -> Str
+    "000000000000000000408080808040000080ffffffff80000080ffffffff80000080ffffffff8000002040404040200000000000000000000000000000000000"
+
+fn want_star_nonzero() -> Str
+    "0000000000000000000000000000000000000000000000292900000000000000000000000000007c7c0000000000000000000000000000cfcf0000000000000000000000000023ffff2300000000000000172a2a2a2a9fffff9f2a2a2a2a17000011adffffffffffffffffffffad110000000067f6fffffffffffff667000000000000002bffffffffffff2b000000000000000000cbffffffffcb00000000000000000018fdfffffffffd18000000000000000069ffc01c1cc0ff690000000000000000b87d030000037db800000000000000043700000000000037040000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_star_evenodd() -> Str
+    "0000000000000000000000000000000000000000000000292900000000000000000000000000007c7c0000000000000000000000000000cfcf0000000000000000000000000023ffff2300000000000000172a2a2a2a9fd5d59f2a2a2a2a17000011adffffff36000036ffffffad110000000067f6e101000001e1f667000000000000002bbd00000000bd2b000000000000000000cb6a00006acb00000000000000000018fdffc2c2fffd18000000000000000069ffc01c1cc0ff690000000000000000b87d030000037db800000000000000043700000000000037040000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_clipped() -> Str
+    "000000000000000000000000000000007b6d60524437291bffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+fn want_circle() -> Str
+    "0000000000000000000000000000000000000000000d517979510d00000000000000000277f1fffffffff17702000000000002a9ffffffffffffffffa9020000000077ffffffffffffffffffff770000000df1fffffffffffffffffffff10d000051ffffffffffffffffffffffff51000079ffffffffffffffffffffffff79000079ffffffffffffffffffffffff79000051ffffffffffffffffffffffff5100000df1fffffffffffffffffffff10d00000077ffffffffffffffffffff770000000002a9ffffffffffffffffa90200000000000277f1fffffffff1770200000000000000000d517979510d000000000000000000000000000000000000000000"
+
+fn want_ring() -> Str
+    "00000000000000000000000000000000000000001a88d4f9f9d4881a000000000000005af3fffffffffffff35a00000000005afefffffffffffffffffe5a0000001af3ffffffd68c8cd6fffffff31a000088ffffff920300000392ffffff880000d4ffffd6030000000003d6ffffd40000f9ffff8c0000000000008cfffff90000f9ffff8c0000000000008cfffff90000d4ffffd6030000000003d6ffffd4000088ffffff920300000392ffffff8800001af3ffffffd68c8cd6fffffff31a0000005afefffffffffffffffffe5a00000000005af3fffffffffffff35a000000000000001a88d4f9f9d4881a0000000000000000000000000000000000000000"
+
+fn want_rotated() -> Str
+    "00000000000000002130000000000000000c60bffe63000000000000001bceffff4700000000000000000cb3ff2a00000000000000000003920e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_scaled() -> Str
+    "000000000000000000000000000000000000000000000000000031200b0000000000000000009ffffff4dfcab59f6600000024fbffffffffffc614000000009fffffffffad09000000000024fbffff8f02000000000000009ffd700000000000000000002452000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_quad() -> Str
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005ae7e75a000000000000004ffdfffffd4f000000000011eaffffffffea110000000088ffffffffffff880000000ff2fffffffffffff20f00006effffffffffffffff6e0000d0ffffffffffffffffd000000000000000000000000000"
+
+@test
+fn test_the_claim_and_the_defaults() [io]
+    test.assert(rasterfill.exact_coverage_is_claimed())
+    test.assert_approx(rasterfill.default_flatten().tolerance, 0.25, 0.0000001)
+    test.assert_eq(rasterfill.default_flatten().max_per_curve, 256)
 
 @test
 fn test_a_half_covered_pixel_is_exactly_one_hundred_and_twenty_eight() [io]
-    test.case("THE CLAIM: coverage is integrated, not sampled")
-    test.assert(rasterfill.exact_coverage_is_claimed())
-
-    match rasterfill.fill(half_pixel_triangle(), geomxform.identity(), unit_clip(),
-                          GeomNonZero, rasterfill.default_flatten(),
-                          rastermask.default_limits())
-        Err(_) => test.assert(false)
-        Ok(m)  =>
-            test.case("so a 45-degree edge through a pixel's centre is 128, not 120 or 136")
-            test.assert(rastermask.at(m, 0, 0) == 128)
-
-    test.case("which seventeen supersampled levels cannot produce at all")
-    test.assert(rasterfill.default_flatten().tolerance <= 0.25)
-
-@test
-fn test_the_star_is_the_shape_where_the_two_fill_rules_disagree() [io]
-    let xf = geomxform.identity()
-    let clip = unit_clip()
-    let fl = rasterfill.default_flatten()
-    let lim = rastermask.default_limits()
-
-    test.case("THE CLAIM: non-zero fills the middle of a self-crossing ring")
-    match rasterfill.fill(star(), xf, clip, GeomNonZero, fl, lim)
-        Err(_) => test.assert(false)
-        Ok(m)  => test.assert(rastermask.at(m, 16, 14) == 255)
-
-    test.case("and even-odd leaves it hollow, which is the SVG specification's own example")
-    match rasterfill.fill(star(), xf, clip, GeomEvenOdd, fl, lim)
-        Err(_) => test.assert(false)
-        Ok(m)  => test.assert(rastermask.at(m, 16, 14) == 0)
-
-    test.case("the same disagreement shows in a point test, with no mask built")
-    test.assert(rasterfill.contains(star(), 16.0, 14.0, GeomNonZero, fl))
-    test.assert(rasterfill.contains(star(), 16.0, 14.0, GeomEvenOdd, fl) == false)
-
-    test.case("and the winding number is published, for a caller with a third rule")
-    test.assert(rasterfill.winding_at(star(), 16.0, 14.0, fl) == 2)
+    test.case("a 45 degree edge through the corner of a pixel")
+    let m = unwrap(rastermask.mask(1, 1, 0, 0, lim()))
+    let half = unwrap(rasterfill.fill(pts([geompoint.ptf(0.0, 0.0), geompoint.ptf(1.0, 0.0), geompoint.ptf(0.0, 1.0)]),
+                                      id(), grid(1, 1), GeomNonZero, flat(), lim()))
+    test.assert_eq(rastermask.at(half, 0, 0), 128)
+    test.assert_eq(m.width, 1)
+    test.case("a pixel a quarter covered is 64, and a whole one is 255")
+    test.assert_eq(rastermask.at(unwrap(rasterfill.fill(square(0.0, 0.0, 0.5, 0.5), id(), grid(1, 1),
+                                                       GeomNonZero, flat(), lim())),
+                                                       0, 0),
+                                                       64)
+    test.assert_eq(rastermask.at(unwrap(rasterfill.fill(square(-1.0, -1.0, 2.0, 2.0), id(), grid(1, 1),
+                                                       GeomNonZero, flat(), lim())),
+                                                       0, 0),
+                                                       255)
 
 @test
-fn test_the_rectangle_fast_path_answers_what_the_sweep_would() [io]
-    let r = geomrect.of_xywh(2.0, 2.0, 4.0, 4.0)
-    let clip = unit_clip()
-    let lim = rastermask.default_limits()
-
-    test.case("THE CLAIM: the fast path is an optimisation, not a second answer")
-    match rasterfill.fill_rect(r, clip, lim)
-        Err(_)   => test.assert(false)
-        Ok(fast) =>
-            match rasterfill.fill(svgpath.of_rect(r, 0.0, 0.0), geomxform.identity(), clip,
-                                  GeomNonZero, rasterfill.default_flatten(), lim)
-                Err(_)   => test.assert(false)
-                Ok(slow) =>
-                    test.assert(rastermask.same_extent(fast, slow))
-                    test.assert(rastermask.at(fast, 3, 3) == rastermask.at(slow, 3, 3))
-                    test.assert(rastermask.at(fast, 3, 3) == 255)
+fn test_polygons_agree_with_the_exact_area() [io]
+    test.case("a triangle with fractional corners")
+    let t = unwrap(rasterfill.fill(pts([geompoint.ptf(1.5, 1.25), geompoint.ptf(10.75, 3.5), geompoint.ptf(4.25, 10.5)]),
+                                   id(), grid(12, 12), GeomNonZero, flat(), lim()))
+    test.assert(worst(t, 12, 12, want_triangle()) <= 1)
+    test.case("the half-diagonal of a square")
+    let d = unwrap(rasterfill.fill(pts([geompoint.ptf(0.0, 0.0), geompoint.ptf(8.0, 0.0), geompoint.ptf(0.0, 8.0)]),
+                                   id(), grid(8, 8), GeomNonZero, flat(), lim()))
+    test.assert(worst(d, 8, 8, want_diagonal()) <= 1)
+    test.case("a rectangle with fractional edges")
+    let r = unwrap(rasterfill.fill(square(1.5, 1.5, 6.5, 5.25), id(), grid(8, 8), GeomNonZero, flat(), lim()))
+    test.assert_eq(worst(r, 8, 8, want_rect()), 0)
 
 @test
-fn test_a_convex_polygon_needs_no_winding_accumulation() [io]
-    let tri = geompoly.of_points_unchecked([geompoint.ptf(0.0, 0.0),
-                                            geompoint.ptf(10.0, 0.0),
-                                            geompoint.ptf(0.0, 10.0)])
-
-    test.case("THE CLAIM: two active edges a scanline, so the fill rule cannot change it")
-    test.assert(geompoly.is_convex(tri))
-    match rasterfill.fill_convex(tri, geomxform.identity(), unit_clip(),
-                                 rastermask.default_limits())
-        Err(_) => test.assert(false)
-        Ok(m)  => test.assert(rastermask.at(m, 1, 1) == 255)
+fn test_curves_agree_with_the_exact_area() [io]
+    test.case("a circle of four cubics")
+    let c = unwrap(rasterfill.fill(circle_path(8.0, 8.0, 6.5, false), id(), grid(16, 16), GeomNonZero, fine(), lim()))
+    test.assert(worst(c, 16, 16, want_circle()) <= 2)
+    test.case("a ring whose inner circle runs the other way has a hole")
+    var ring = circle_path(8.0, 8.0, 7.0, false)
+    for cmd in svgpath.commands_of(circle_path(8.0, 8.0, 3.5, true))
+        ring = svgpath.push(ring, cmd)
+    let rm = unwrap(rasterfill.fill(ring, id(), grid(16, 16), GeomNonZero, fine(), lim()))
+    test.assert(worst(rm, 16, 16, want_ring()) <= 2)
+    test.assert_eq(rastermask.at(rm, 8, 8), 0)
+    test.case("a quadratic")
+    let q = svgpath.close(svgpath.quad_to(svgpath.move_to(svgpath.empty(), 1.0, 11.0), 6.0, -3.0, 11.0, 11.0))
+    test.assert(worst(unwrap(rasterfill.fill(q, id(), grid(12, 12), GeomNonZero, fine(), lim())),
+        12,
+        12,
+        want_quad()) <= 2)
+    test.case("the default tolerance moves an edge by at most a quarter of a pixel")
+    test.case("which changes a pixel's coverage by at most that times the square root of two")
+    let coarse = unwrap(rasterfill.fill(circle_path(8.0, 8.0, 6.5, false), id(), grid(16, 16), GeomNonZero, flat(), lim()))
+    test.assert(worst(coarse, 16, 16, want_circle()) <= 90)
 
 @test
-fn test_a_path_mostly_off_screen_costs_the_pixels_it_touches() [io]
-    let far = svgpath.of_rect(geomrect.of_xywh(0 - 1000.0, 0 - 1000.0, 1001.0, 1001.0),
-                              0.0, 0.0)
+fn test_arcs_fill_like_the_circle_they_are() [io]
+    let disc = svgpath.of_ellipse(geompoint.ptf(8.0, 8.0), 6.0, 6.0)
+    let m = unwrap(rasterfill.fill(disc, id(), grid(16, 16), GeomNonZero, fine(), lim()))
+    let area = total_coverage(m) as Float / 255.0
+    test.assert_approx(area, math.pi() * 36.0, 0.5)
+    test.case("a rounded rectangle")
+    let rr = svgpath.of_rect(geomrect.of_xywh(1.0, 1.0, 14.0, 10.0), 3.0, 3.0)
+    let rm = unwrap(rasterfill.fill(rr, id(), grid(16, 12), GeomNonZero, fine(), lim()))
+    test.assert_approx(total_coverage(rm) as Float / 255.0, 14.0 * 10.0 - (4.0 - math.pi()) * 9.0, 0.5)
 
-    test.case("THE CLAIM: the mask covers the bounds INTERSECTED with the clip")
-    let b = rasterfill.pixel_bounds(far, geomxform.identity(), unit_clip())
-    test.assert(geomrect.width_i(b) <= 2)
+@test
+fn test_the_star_is_where_the_two_fill_rules_disagree() [io]
+    let nz = unwrap(rasterfill.fill(star(), id(), grid(16, 16), GeomNonZero, flat(), lim()))
+    let eo = unwrap(rasterfill.fill(star(), id(), grid(16, 16), GeomEvenOdd, flat(), lim()))
+    test.assert(worst(nz, 16, 16, want_star_nonzero()) <= 1)
+    test.assert(worst(eo, 16, 16, want_star_evenodd()) <= 1)
+    test.case("the middle of the pentagram is inside under non-zero and outside under even-odd")
+    test.assert_eq(rastermask.at(nz, 8, 8), 255)
+    test.assert_eq(rastermask.at(eo, 8, 8), 0)
+    test.case("a point in one arm is covered the same under both")
+    test.assert(rastermask.at(nz, 8, 2) > 100)
+    test.assert_eq(rastermask.at(nz, 8, 2), rastermask.at(eo, 8, 2))
 
-    test.case("so a huge shape at the corner is a tiny mask, not a refusal")
-    match rasterfill.fill(far, geomxform.identity(), unit_clip(),
-                          GeomNonZero, rasterfill.default_flatten(),
-                          rastermask.default_limits())
-        Err(_) => test.assert(false)
-        Ok(m)  => test.assert(m.width <= 2)
+@test
+fn test_nested_squares_in_one_direction_fill_or_hollow_by_rule() [io]
+    let both = joined(square(2.0, 2.0, 22.0, 22.0), square(6.0, 6.0, 18.0, 18.0))
+    test.assert_eq(rastermask.at(unwrap(rasterfill.fill(both, id(), grid(24, 24), GeomNonZero, flat(), lim())), 12, 12),
+        255)
+    test.assert_eq(rastermask.at(unwrap(rasterfill.fill(both, id(), grid(24, 24), GeomEvenOdd, flat(), lim())), 12, 12),
+        0)
+    test.assert_eq(rastermask.at(unwrap(rasterfill.fill(both, id(), grid(24, 24), GeomEvenOdd, flat(), lim())), 3, 12),
+        255)
+
+@test
+fn test_the_mask_covers_the_bounds_inside_the_clip() [io]
+    test.case("the box is the path's bounds rounded outward")
+    let m = unwrap(rasterfill.fill(square(2.25, 3.5, 6.75, 5.0), id(), grid(20, 20), GeomNonZero, flat(), lim()))
+    test.assert_eq(m.origin_x, 2)
+    test.assert_eq(m.origin_y, 3)
+    test.assert_eq(m.width, 5)
+    test.assert_eq(m.height, 2)
+    test.case("a clip with an origin of its own gives the mask coordinates in the target")
+    let tile = unwrap(rasterfill.fill(square(10.0, 10.0, 30.0, 30.0), id(), geomrect.of_xywh_i(16, 12, 8, 8),
+                                      GeomNonZero, flat(), lim()))
+    test.assert_eq(tile.origin_x, 16)
+    test.assert_eq(tile.origin_y, 12)
+    test.assert_eq(tile.width, 8)
+    test.assert_eq(tile.height, 8)
+    test.assert(rastermask.is_opaque(tile))
+    test.case("a shape wholly outside the clip is an empty mask of one pixel at the clip's corner")
+    let none = unwrap(rasterfill.fill(square(50.0, 50.0, 60.0, 60.0), id(), grid(20, 20), GeomNonZero, flat(), lim()))
+    test.assert(rastermask.is_empty(none))
+    test.assert_eq(none.width, 1)
+    test.assert_eq(none.height, 1)
+    test.assert_eq(none.origin_x, 0)
+    test.case("so is an empty path, and a path of one point")
+    test.assert(rastermask.is_empty(unwrap(rasterfill.fill(svgpath.empty(), id(), grid(5, 5), GeomNonZero, flat(), lim()))))
+    test.assert(rastermask.is_empty(unwrap(rasterfill.fill(svgpath.move_to(svgpath.empty(), 2.0, 2.0), id(),
+                                                           grid(5, 5), GeomNonZero, flat(), lim()))))
+
+@test
+fn test_edges_beyond_the_clip_still_count_their_winding() [io]
+    test.case("a shape that starts left of the mask and ends inside it")
+    let left = unwrap(rasterfill.fill(pts([geompoint.ptf(-4.5, 2.25), geompoint.ptf(9.5, 3.0), geompoint.ptf(6.25, 14.0),
+                                           geompoint.ptf(-2.0, 8.0)]),
+                                           id(), grid(8, 8), GeomNonZero, flat(), lim()))
+    test.assert(worst(left, 8, 8, want_clipped()) <= 1)
+    test.case("a shape covering the clip on every side is solid")
+    test.assert(rastermask.is_opaque(unwrap(rasterfill.fill(square(-5.0, -5.0, 50.0, 50.0), id(), grid(8, 8),
+                                                            GeomNonZero, flat(), lim()))))
+    test.case("a shape wholly to the right adds nothing")
+    test.assert(rastermask.is_empty(unwrap(rasterfill.fill(square(20.0, 1.0, 30.0, 6.0), id(), grid(8, 8),
+                                                           GeomNonZero, flat(), lim()))))
+
+@test
+fn test_the_transform_maps_the_path_to_pixels() [io]
+    test.case("a rotation by a right angle and a shift")
+    let rot = geomxform.of_matrix(0.0, 1.0, -1.0, 0.0, 10.0, 0.0)
+    test.assert(worst(unwrap(rasterfill.fill(tri(), rot, grid(12, 12), GeomNonZero, flat(), lim())),
+        12,
+        12,
+        want_rotated()) <= 1)
+    test.case("a scale about the origin and a shift")
+    let sc = geomxform.of_matrix(2.0, 0.0, 0.0, 1.5, 1.0, 2.0)
+    test.assert(worst(unwrap(rasterfill.fill(tri(), sc, grid(12, 12), GeomNonZero, flat(), lim())),
+        12,
+        12,
+        want_scaled()) <= 1)
+    test.case("the tolerance is in pixels, so a bigger picture of a curve is cut finer")
+    let c = circle_path(1.0, 1.0, 0.8, false)
+    let small = rasterfill.edge_count(c, id(), flat())
+    let big = rasterfill.edge_count(c, geomxform.scaling(20.0, 20.0), flat())
+    test.assert(big > small)
 
 @test
 fn test_a_collapsing_transform_is_refused_rather_than_drawn_as_nothing() [io]
-    let flat = geomxform.scaling(1.0, 0.0)
-
-    test.case("THE CLAIM: a caller composed that matrix, and the collapse is its bug")
-    test.assert(geomxform.is_invertible(flat) == false)
-    match rasterfill.fill(star(), flat, unit_clip(), GeomNonZero,
-                          rasterfill.default_flatten(), rastermask.default_limits())
-        Ok(_)  => test.assert(false)
-        Err(e) => test.assert(e.message() != "")
+    let flatten = geomxform.of_matrix(1.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    test.assert_eq_str(fault_of(rasterfill.fill(tri(), flatten, grid(8, 8), GeomNonZero, flat(), lim())),
+                       "the transform collapses the plane and cannot be inverted")
+    test.assert_eq_str(fault_of(rasterfill.fill_all([tri()], geomxform.scaling(0.0, 3.0), grid(8, 8), GeomNonZero,
+                                                    flat(), lim())),
+                       "the transform collapses the plane and cannot be inverted")
+    test.assert_eq_str(fault_of(rasterfill.fill_convex(geompoly.of_rect(geomrect.of_xywh(0.0, 0.0, 3.0, 3.0)),
+                                                       geomxform.scaling(0.0, 0.0), grid(8, 8), lim())),
+                       "the transform collapses the plane and cannot be inverted")
 
 @test
-fn test_the_flattening_tolerance_is_in_pixels_and_is_applied_after_the_transform() [io]
-    let curve = svgpath.quad_to(svgpath.move_to(svgpath.empty(), 0.0, 0.0),
-                                50.0, 100.0, 100.0, 0.0)
-    let fl = rasterfill.default_flatten()
+fn test_the_budgets_refuse_before_anything_is_built() [io]
+    test.case("a mask past the pixel limit carries both numbers")
+    let small = RstLimits { max_pixels: 100, max_edges: 1000 }
+    test.assert_eq_str(fault_of(rasterfill.fill(square(0.0, 0.0, 20.0, 20.0), id(), grid(30, 30), GeomNonZero, flat(), small)),
+                       "a mask of 400 pixels is past the limit of 100")
+    test.assert_eq_str(fault_of(rasterfill.fill_rect(geomrect.of_xywh(0.0, 0.0, 20.0, 20.0), grid(30, 30), small)),
+                       "a mask of 400 pixels is past the limit of 100")
+    test.case("a path with more edges than allowed is refused with the count")
+    let few = RstLimits { max_pixels: 100000, max_edges: 3 }
+    test.assert_eq_str(fault_of(rasterfill.fill(square(0.0, 0.0, 5.0, 5.0), id(), grid(30, 30), GeomNonZero, flat(), few)),
+                       "a mask of 4 pixels is past the limit of 3")
+    test.assert(rastererror.is_budget(RstTooLarge(4, 3)))
+    test.case("a path from a file with a petabyte bounding box is held to the clip")
+    let huge = unwrap(rasterfill.fill(square(-1000000000000.0, -1000000000000.0, 1000000000000.0, 1000000000000.0),
+                                      id(), grid(6, 6), GeomNonZero, flat(), lim()))
+    test.assert(rastermask.is_opaque(huge))
+    test.case("and one the clip does not hold is refused")
+    test.assert_eq(fault_of(rasterfill.fill(square(0.0, 0.0, 1000000000000.0, 1000000000000.0), id(),
+                                            geomrect.of_xywh_i(0, 0, 100000, 100000), GeomNonZero, flat(), lim())),
+                   "a mask of 10000000000 pixels is past the limit of 67108864")
 
-    test.case("THE CLAIM: the error that matters is how far off it is ON THE SCREEN")
-    let tiny = rasterfill.edge_count(curve, geomxform.scaling(0.05, 0.05), fl)
-    let big = rasterfill.edge_count(curve, geomxform.scaling(4.0, 4.0), fl)
-    test.assert(tiny < big)
+@test
+fn test_not_a_number_and_infinite_coordinates_do_not_escape() [io]
+    let nan = math.nan()
+    let bad = pts([geompoint.ptf(nan, 1.0), geompoint.ptf(4.0, 1.0), geompoint.ptf(4.0, 4.0)])
+    let m = unwrap(rasterfill.fill(bad, id(), grid(6, 6), GeomNonZero, flat(), lim()))
+    test.assert(m.width >= 1)
+    let first_nan = svgpath.of_commands([SvgMoveTo(nan, 1.0), SvgLineTo(2.0, 2.0), SvgLineTo(8.0, 2.0), SvgLineTo(8.0, 6.0)])
+    test.assert(unwrap(rasterfill.fill(first_nan, id(), grid(10, 10), GeomNonZero, flat(), lim())).width >= 1)
+    let wide = pts([geompoint.ptf(0.0, 0.0), geompoint.ptf(math.infinity(), 0.0), geompoint.ptf(0.0, 3.0)])
+    test.assert(unwrap(rasterfill.fill(wide, id(), grid(6, 6), GeomNonZero, flat(), lim())).width >= 1)
 
-    test.case("so the same glyph at 8 pixels is far fewer segments than at 200")
-    test.assert(tiny >= 1)
+@test
+fn test_fill_all_applies_the_rule_across_the_set() [io]
+    test.case("two paths fill as one: the inner square of a second path cancels the first under even-odd")
+    let outer = square(2.0, 2.0, 22.0, 22.0)
+    let inner = square(6.0, 6.0, 18.0, 18.0)
+    let set = unwrap(rasterfill.fill_all([outer, inner], id(), grid(24, 24), GeomEvenOdd, flat(), lim()))
+    test.assert_eq(rastermask.at(set, 12, 12), 0)
+    test.assert_eq(rastermask.at(set, 3, 12), 255)
+    test.case("it is not the union of the two fills")
+    let a = unwrap(rasterfill.fill(outer, id(), grid(24, 24), GeomEvenOdd, flat(), lim()))
+    let b = unwrap(rasterfill.fill(inner, id(), grid(24, 24), GeomEvenOdd, flat(), lim()))
+    test.assert_eq(rastermask.at(unwrap(rastermask.union(unwrap(rastermask.retarget(a, rastermask.extent(a), lim())),
+                                                          unwrap(rastermask.retarget(b, rastermask.extent(a), lim())))),
+                                                          12, 12),
+                                                          255)
+    test.case("one path is the same as fill")
+    let one = unwrap(rasterfill.fill_all([tri()], id(), grid(12, 12), GeomNonZero, flat(), lim()))
+    test.assert_eq(worst(one,
+        12,
+        12,
+        plane(unwrap(rasterfill.fill(tri(), id(), grid(12, 12), GeomNonZero, flat(), lim())), 12, 12)),
+    0)
+    test.case("no paths is an empty mask")
+    test.assert(rastermask.is_empty(unwrap(rasterfill.fill_all([], id(), grid(4, 4), GeomNonZero, flat(), lim()))))
 
-    test.case("and the flattened path is published, so a hit test uses the SAME polyline")
-    let flat = rasterfill.flatten_path(curve, geomxform.identity(), fl)
-    test.assert(svgpath.command_count(flat) >= svgpath.command_count(curve))
+@test
+fn test_the_rectangle_fast_path_answers_what_the_sweep_would() [io]
+    let rects = [geomrect.of_xywh(1.5, 1.5, 5.0, 3.75), geomrect.of_xywh(0.0, 0.0, 8.0, 8.0),
+                 geomrect.of_xywh(2.2, 3.3, 0.4, 0.4), geomrect.of_xywh(0.1, 0.1, 7.7, 0.3),
+                 geomrect.of_xywh(-3.5, -2.25, 6.0, 5.0), geomrect.of_xywh(5.5, 5.5, 9.0, 9.0),
+                 geomrect.of_xywh(3.0, 3.0, 2.0, 2.0)]
+    for r in rects
+        let fast = unwrap(rasterfill.fill_rect(r, grid(8, 8), lim()))
+        let swept = unwrap(rasterfill.fill(svgpath.of_rect(r, 0.0, 0.0), id(), grid(8, 8), GeomNonZero, flat(), lim()))
+        test.assert_eq(fast.origin_x, swept.origin_x)
+        test.assert_eq(fast.origin_y, swept.origin_y)
+        test.assert_eq(fast.width, swept.width)
+        test.assert_eq(fast.height, swept.height)
+        test.assert(worst(fast, 8, 8, plane(swept, 8, 8)) <= 1)
+    test.case("a rectangle given with its corners the wrong way round is the same rectangle")
+    let swapped = GeomRectF { min: geompoint.ptf(6.5, 5.25), max: geompoint.ptf(1.5, 1.5) }
+    test.assert_eq(worst(unwrap(rasterfill.fill_rect(swapped, grid(8, 8), lim())), 8, 8, want_rect()), 0)
+    test.case("an empty rectangle and one off the clip are empty")
+    test.assert(rastermask.is_empty(unwrap(rasterfill.fill_rect(geomrect.of_xywh(2.0, 2.0, 0.0, 3.0), grid(8, 8), lim()))))
+    test.assert(rastermask.is_empty(unwrap(rasterfill.fill_rect(geomrect.of_xywh(20.0, 2.0, 3.0, 3.0), grid(8, 8), lim()))))
 
-    test.case("with a per-curve ceiling whatever the tolerance asks for")
-    test.assert(fl.max_per_curve >= 16)
+@test
+fn test_a_convex_polygon_fills_like_the_sweep() [io]
+    let p = geompoly.regular(geompoint.ptf(8.0, 8.0), 6.5, 7)!
+    let fast = unwrap(rasterfill.fill_convex(p, id(), grid(16, 16), lim()))
+    let swept = unwrap(rasterfill.fill(svgpath.of_points(geompoly.points_of(p), true), id(), grid(16, 16), GeomNonZero, flat(), lim()))
+    test.assert_eq(fast.origin_x, swept.origin_x)
+    test.assert_eq_str(bytes.to_hex(fast.coverage), bytes.to_hex(swept.coverage))
+    test.case("through a transform")
+    let t = geomxform.of_matrix(0.8, 0.3, -0.3, 0.8, 3.0, 1.0)
+    let moved = unwrap(rasterfill.fill_convex(p, t, grid(16, 16), lim()))
+    test.assert_eq_str(bytes.to_hex(moved.coverage),
+                       bytes.to_hex(unwrap(rasterfill.fill(svgpath.of_points(geompoly.points_of(p), true), t, grid(16, 16), GeomNonZero, flat(), lim())).coverage))
+
+@test
+fn test_measuring_before_filling() [io]
+    test.case("the pixel bounds are the transformed path's box rounded outward, inside the clip")
+    let b = rasterfill.pixel_bounds(circle_path(10.0, 10.0, 4.0, false), id(), grid(100, 100))
+    test.assert_eq(b.min.x, 6)
+    test.assert_eq(b.max.x, 14)
+    test.assert_eq(b.min.y, 6)
+    test.assert_eq(b.max.y, 14)
+    let s = rasterfill.pixel_bounds(tri(), geomxform.scaling(2.0, 2.0), grid(100, 100))
+    test.assert_eq(s.min.x, 1)
+    test.assert_eq(s.max.x, 10)
+    test.assert_eq(rasterfill.pixel_bounds(tri(), id(), geomrect.of_xywh_i(3, 0, 1, 100)).min.x, 3)
+    test.assert(geomrect.is_empty_i(rasterfill.pixel_bounds(tri(), id(), geomrect.of_xywh_i(50, 50, 4, 4))))
+    test.assert(geomrect.is_empty_i(rasterfill.pixel_bounds(svgpath.empty(), id(), grid(10, 10))))
+
+    test.case("edges are counted with the one that closes each subpath")
+    test.assert_eq(rasterfill.edge_count(tri(), id(), flat()), 3)
+    test.assert_eq(rasterfill.edge_count(svgpath.empty(), id(), flat()), 0)
+    test.assert_eq(rasterfill.edge_count(svgpath.line_to(svgpath.move_to(svgpath.empty(), 0.0, 0.0), 4.0, 0.0), id(), flat()),
+        2)
+
+@test
+fn test_flattening_turns_curves_into_lines_and_keeps_the_subpaths() [io]
+    let curved = rasterfill.flatten_path(circle_path(8.0, 8.0, 6.0, false), id(), flat())
+    test.assert(svgpath.command_count(curved) > 8)
+    var lines = true
+    for c in svgpath.commands_of(curved)
+        match c
+            SvgMoveTo(_, _) => ()
+            SvgLineTo(_, _) => ()
+            SvgClosePath    => ()
+            _               =>
+                lines = false
+    test.assert(lines)
+    test.assert_eq(svgpath.subpath_count(curved), 1)
+    test.case("a closed subpath stays closed and an open one stays open")
+    let mixed = svgpath.line_to(svgpath.move_to(svgpath.close(svgpath.line_to(svgpath.line_to(
+        svgpath.move_to(svgpath.empty(), 0.0, 0.0), 4.0, 0.0),
+        4.0, 4.0)),
+        10.0, 10.0),
+        14.0, 10.0)
+    let f = rasterfill.flatten_path(mixed, id(), flat())
+    test.assert_eq(svgpath.subpath_count(f), 2)
+    test.assert_eq(svgpath.command_count(f), 6)
+    test.case("the output is in pixels")
+    test.assert_approx(svgpath.bounds(rasterfill.flatten_path(tri(), geomxform.scaling(3.0, 3.0), flat())).max.x,
+        15.0,
+        0.0001)
+    test.case("a smaller tolerance cuts a curve into more pieces, and the cap limits it")
+    let c = circle_path(8.0, 8.0, 6.0, false)
+    test.assert(rasterfill.edge_count(c, id(), fine()) > rasterfill.edge_count(c, id(), flat()))
+    test.assert(rasterfill.edge_count(c, id(), RstFlatten { tolerance: 0.0001, max_per_curve: 4 }) <= 16)
+    test.assert(rasterfill.edge_count(c, id(), RstFlatten { tolerance: 0.0001, max_per_curve: 0 }) > 16)
+
+@test
+fn test_subpaths_follow_the_svg_rules_for_moves_and_closes() [io]
+    test.case("a line before any move draws nothing")
+    let before = svgpath.of_commands([SvgLineTo(3.0, 3.0), SvgMoveTo(1.0, 1.0), SvgLineTo(5.0, 1.0), SvgLineTo(5.0, 5.0)])
+    test.assert_eq(rasterfill.edge_count(before, id(), flat()), 3)
+    test.case("a curve before any move draws nothing either")
+    test.assert_eq(rasterfill.edge_count(svgpath.of_commands([SvgQuadTo(1.0, 1.0, 2.0, 2.0)]), id(), flat()), 0)
+    test.case("a line after a close starts a new subpath at the start of the closed one")
+    let again = svgpath.of_commands([SvgMoveTo(0.0, 0.0), SvgLineTo(4.0, 0.0), SvgLineTo(4.0, 4.0), SvgClosePath,
+                                     SvgLineTo(0.0, 8.0)])
+    let f = svgpath.commands_of(rasterfill.flatten_path(again, id(), flat()))
+    test.assert_eq(list.len(f), 6)
+    test.case("two moves in a row draw nothing for the first")
+    test.assert_eq(rasterfill.edge_count(svgpath.of_commands([SvgMoveTo(0.0, 0.0), SvgMoveTo(1.0, 1.0), SvgLineTo(3.0, 1.0)]),
+        id(),
+        flat()),
+    2)
+    test.case("a close with nothing since the last close adds no run")
+    test.assert_eq(rasterfill.edge_count(svgpath.of_commands([SvgMoveTo(0.0, 0.0), SvgLineTo(3.0, 0.0), SvgClosePath,
+                                                              SvgClosePath]),
+                                                              id(), flat()),
+                                                              2)
+    test.case("a close straight after a move is a run of one point")
+    test.assert_eq(svgpath.subpath_count(rasterfill.flatten_path(svgpath.of_commands([SvgMoveTo(2.0, 2.0), SvgClosePath]), id(), flat())),
+        1)
+
+@test
+fn test_a_point_is_inside_by_the_winding_number() [io]
+    let sq = square(0.0, 0.0, 10.0, 10.0)
+    let cw = pts([geompoint.ptf(0.0, 0.0),
+        geompoint.ptf(0.0, 10.0),
+        geompoint.ptf(10.0, 10.0),
+        geompoint.ptf(10.0, 0.0)])
+    test.assert_eq(rasterfill.winding_at(sq, 5.0, 5.0, flat()), 1)
+    test.assert_eq(rasterfill.winding_at(cw, 5.0, 5.0, flat()), -1)
+    test.assert_eq(rasterfill.winding_at(sq, 15.0, 5.0, flat()), 0)
+    test.assert_eq(rasterfill.winding_at(sq, -1.0, 5.0, flat()), 0)
+    test.assert_eq(rasterfill.winding_at(sq, 5.0, -1.0, flat()), 0)
+    test.assert_eq(rasterfill.winding_at(sq, 5.0, 11.0, flat()), 0)
+    test.case("an open path is closed for the test")
+    test.assert_eq(rasterfill.winding_at(svgpath.of_points([geompoint.ptf(0.0, 0.0), geompoint.ptf(10.0, 0.0), geompoint.ptf(10.0, 10.0),
+                                                           geompoint.ptf(0.0, 10.0)],
+                                                           false),
+                                                           5.0, 5.0, flat()),
+                                                           1)
+    test.case("the middle of a pentagram winds twice, and the rules read the number differently")
+    test.assert_eq(rasterfill.winding_at(star(), 8.0, 8.0, flat()), 2)
+    test.assert(rasterfill.contains(star(), 8.0, 8.0, GeomNonZero, flat()))
+    test.assert(rasterfill.contains(star(), 8.0, 8.0, GeomEvenOdd, flat()) == false)
+    test.assert(rasterfill.contains(star(), 8.0, 2.0, GeomEvenOdd, flat()))
+    test.assert(rasterfill.contains(star(), 0.5, 0.5, GeomNonZero, flat()) == false)
+    test.case("opposite rings cancel and a hole is outside")
+    var ring = circle_path(8.0, 8.0, 7.0, false)
+    for cmd in svgpath.commands_of(circle_path(8.0, 8.0, 3.5, true))
+        ring = svgpath.push(ring, cmd)
+    test.assert(rasterfill.contains(ring, 8.0, 8.0, GeomNonZero, fine()) == false)
+    test.assert(rasterfill.contains(ring, 8.0, 2.5, GeomNonZero, fine()))
+    test.case("the test is in the path's own coordinates")
+    test.assert(rasterfill.contains(tri(), 2.0, 1.5, GeomNonZero, flat()))
+    test.assert(rasterfill.contains(tri(), 20.0, 15.0, GeomNonZero, flat()) == false)

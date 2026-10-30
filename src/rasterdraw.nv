@@ -144,7 +144,8 @@ pub fn fill_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPaint,
                  xform: geomxform.GeomXform,
                  o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
     let mask = match rasterfill.fill(path, xform, drawable(img, o), rule, o.flatten, o.limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(m)  => m
     composite(img, mask, paint, o)
 
@@ -167,11 +168,13 @@ pub fn stroke_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPain
                               miter_limit: style.miter_limit, dash: style.dash,
                               dash_offset: style.dash_offset }
     let ink = match rasterstroke.outline(path, st)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(p)  => p
     let mask = match rasterfill.fill(ink, xform, drawable(img, o), rasterstroke.fill_rule(), o.flatten,
                                      o.limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(m)  => m
     composite(img, mask, paint, o)
 
@@ -183,7 +186,8 @@ pub fn stroke_path(img: Image, path: svgpath.SvgPath, paint: rasterpaint.RstPain
 pub fn fill_rect(img: Image, r: geomrect.GeomRectF, paint: rasterpaint.RstPaint,
                  o: RstDrawOpts) -> Result<Image, rastererror.RstFault> []
     let mask = match rasterfill.fill_rect(r, drawable(img, o), o.limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(m)  => m
     composite(img, mask, paint, o)
 
@@ -222,9 +226,9 @@ pub fn draw_image(dst: Image, src: Image, at_x: Int, at_y: Int,
             let cov = shaped_clip(o, x, y, 255)
             if cov > 0
                 let at = (y - at_y) * image.stride(src) + (x - at_x) * sstep
-                let sp = (image.read16(src.samples, at, src.kind, 0) >> 8 << 24)
-                    | (image.read16(src.samples, at, src.kind, 1) >> 8 << 16)
-                    | (image.read16(src.samples, at, src.kind, 2) >> 8 << 8)
+                let sp = ((image.read16(src.samples, at, src.kind, 0) >> 8) << 24)
+                    | ((image.read16(src.samples, at, src.kind, 1) >> 8) << 16)
+                    | ((image.read16(src.samples, at, src.kind, 2) >> 8) << 8)
                     | (image.read16(src.samples, at, src.kind, 3) >> 8)
                 let to = y * image.stride(dst) + x * dstep
                 store_pixel(var buf, to, dst.kind,
@@ -248,7 +252,8 @@ pub fn mask_to_image(m: rastermask.RstMask) -> Image []
 pub fn image_to_mask(img: Image, origin_x: Int, origin_y: Int,
                      limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
     let opaque = match rastermask.full(img.width, img.height, origin_x, origin_y, limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(m)  => m
     if not image.has_alpha(img.kind)
         return Ok(opaque)
@@ -263,15 +268,15 @@ pub fn image_to_mask(img: Image, origin_x: Int, origin_y: Int,
 
 // The name of a pixel kind, as `RstPixelKind` carries it.
 fn kind_name(k: PixelKind) -> Str
-    match k
-        PixLuma8       => "PixLuma8"
-        PixLumaAlpha8  => "PixLumaAlpha8"
-        PixRgb8        => "PixRgb8"
-        PixRgba8       => "PixRgba8"
-        PixLuma16      => "PixLuma16"
-        PixLumaAlpha16 => "PixLumaAlpha16"
-        PixRgb16       => "PixRgb16"
-        PixRgba16      => "PixRgba16"
+    var name = "PixRgb"
+    if image.is_grey(k)
+        name = "PixLuma"
+    if image.has_alpha(k)
+        if image.is_grey(k)
+            name = name + "Alpha"
+        else
+            name = name + "a"
+    name + "${image.bytes_per_sample(k) * 8}"
 
 // The pixels a draw may touch: the clip rectangle inside the image.
 fn drawable(img: Image, o: RstDrawOpts) -> geomrect.GeomRectI
@@ -309,16 +314,16 @@ fn store_pixel(var buf: Bytes, at: Int, k: PixelKind, v: Int)
     let b = (v >> 8) & 255
     let a = v & 255
     match k
-        PixRgba8      =>
+        PixRgba8 =>
             bytes.set_u8(buf, at, r)
             bytes.set_u8(buf, at + 1, g)
             bytes.set_u8(buf, at + 2, b)
             bytes.set_u8(buf, at + 3, a)
-        PixRgb8       =>
+        PixRgb8  =>
             bytes.set_u8(buf, at, r)
             bytes.set_u8(buf, at + 1, g)
             bytes.set_u8(buf, at + 2, b)
-        _             =>
+        _        =>
             if r == g and g == b
                 bytes.set_u8(buf, at, r)
                 if k == PixLumaAlpha8
@@ -353,13 +358,15 @@ fn paint_region(img: Image, m: ?rastermask.RstMask, region: geomrect.GeomRectI,
     var opaque_write = false
     if solid
         fixed = rasterpaint.ramp_packed(paint, 1)[0]
-        opaque_write = (fixed & 255) == 255 and (mode == RstOver or mode == RstSrcCopy)
+        opaque_write = (fixed & 255) == 255 and mode == RstOver
     for y in box.min.y..box.max.y
         for x in box.min.x..box.max.x
             var cov = 255
             match m
-                Some(mask) => cov = rastermask.at(mask, x, y)
-                None       => cov = 255
+                Some(mask) =>
+                    cov = rastermask.at(mask, x, y)
+                None       =>
+                    cov = 255
             cov = shaped_clip(o, x, y, cov)
             if cov > 0
                 var src = fixed
@@ -368,7 +375,7 @@ fn paint_region(img: Image, m: ?rastermask.RstMask, region: geomrect.GeomRectI,
                     let t = rasterpaint.ramp_position(paint, q.x, q.y)
                     src = ramp[math.round(t * (ramp_size() - 1) as Float) as Int]
                 let at = y * stride + x * step
-                if cov == 255 and (opaque_write or mode == RstSrcCopy and (src & 255) == 255)
+                if cov == 255 and (opaque_write or mode == RstSrcCopy)
                     store_pixel(var buf, at, img.kind, src)
                 else
                     store_pixel(var buf, at, img.kind,

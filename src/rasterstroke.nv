@@ -196,8 +196,12 @@ pub fn stroked_bounds(path: svgpath.SvgPath, style: RstStrokeStyle) -> geomrect.
             reach = math.max(reach, sharpest_miter(run, style.miter_limit))
     if style.cap == RstSquare
         reach = math.max(reach, math.sqrt(2.0))
+    if list.is_empty(pts)
+        return geomrect.empty()
     let h = width / 2.0 * reach
-    geomrect.inflate(geomrect.bounding(pts), h, h)
+    let box = geomrect.bounding(pts)
+    geomrect.of_corners(geompoint.ptf(box.min.x - h, box.min.y - h),
+                        geompoint.ptf(box.max.x + h, box.max.y + h))
 
 // How far past a corner the miter reaches, as a multiple of half the
 // width.
@@ -224,8 +228,8 @@ pub fn miter_becomes_bevel(angle_radians: Float, limit: Float) -> Bool []
 pub fn stroke_contains(path: svgpath.SvgPath, style: RstStrokeStyle, at_x: Float,
                        at_y: Float) -> Bool []
     match outline_at(path, s_or_unit(style), default_tolerance(style))
-        Err(_)    => false
-        Ok(ink)   => rasterfill.contains(ink, at_x, at_y, GeomNonZero, rasterfill.default_flatten())
+        Err(_)  => false
+        Ok(ink) => rasterfill.contains(ink, at_x, at_y, GeomNonZero, rasterfill.default_flatten())
 
 // ── The stroker ──────────────────────────────────────────────────────
 
@@ -269,12 +273,12 @@ fn flat_runs(path: svgpath.SvgPath, tol: Float) -> [svgpath.SvgSubpath]
     var pts: [GeomPointF] = []
     for c in svgpath.commands_of(flat)
         match c
-            SvgMoveTo(x, y)  =>
+            SvgMoveTo(x, y) =>
                 if not list.is_empty(pts)
                     list.push(runs, svgpath.SvgSubpath { points: pts, closed: false })
                 pts = [geompoint.ptf(x, y)]
-            SvgLineTo(x, y)  => list.push(pts, geompoint.ptf(x, y))
-            _                =>
+            SvgLineTo(x, y) => list.push(pts, geompoint.ptf(x, y))
+            _               =>
                 list.push(runs, svgpath.SvgSubpath { points: pts, closed: true })
                 pts = []
     if not list.is_empty(pts)
@@ -451,10 +455,30 @@ fn stroke_run(var cmds: [SvgPathCmd], run: svgpath.SvgSubpath, h: Float, style: 
         if not list.is_empty(disc)
             emit_contour(var cmds, disc)
         return
+    if run.closed and n == 2
+        // A line there and back: a join at each end, which at a half turn
+        // is a flat end for a bevel or a miter and a half disc for a
+        // round join.
+        var cap = RstButt
+        if style.join == RstRound
+            cap = RstRoundCap
+        stroke_open(var cmds, pts, h, RstStrokeStyle { width: style.width, join: style.join, cap: cap,
+                                                        miter_limit: style.miter_limit, dash: [],
+                                                        dash_offset: 0.0 },
+                                                        tol)
+        return
     if run.closed
         emit_contour(var cmds, left_side(pts, true, h, style, tol))
         emit_contour(var cmds, left_side(reversed_points(pts), true, h, style, tol))
         return
+    stroke_open(var cmds, pts, h, style, tol)
+
+// The outline of an open run of distinct points: the left side out, the
+// cap at the end, the left side of the reversed run back, and the cap at
+// the start.
+fn stroke_open(var cmds: [SvgPathCmd], pts: [GeomPointF], h: Float, style: RstStrokeStyle,
+               tol: Float)
+    let n = list.len(pts)
     var ring = left_side(pts, false, h, style, tol)
     add_cap(var ring, pts[n - 1], unit_toward(pts[n - 2], pts[n - 1]), h, style.cap, tol)
     for q in left_side(reversed_points(pts), false, h, style, tol)
@@ -467,7 +491,8 @@ fn outline_at(path: svgpath.SvgPath, style: RstStrokeStyle,
     var src = path
     if not list.is_empty(style.dash)
         src = match dash_at(path, style.dash, style.dash_offset, tol)
-            Err(e) => return Err(e)
+            Err(e) =>
+                return Err(e)
             Ok(d)  => d
     var cmds: [SvgPathCmd] = []
     if style.width != 0.0
@@ -482,7 +507,7 @@ fn sharpest_miter(run: svgpath.SvgSubpath, limit: Float) -> Float
     let n = list.len(pts)
     var reach = 1.0
     for i in 0..n
-        if run.closed or (i > 0 and i < n - 1)
+        if run.closed or i > 0 and i < n - 1
             let d0 = unit_toward(pts[(i + n - 1) % n], pts[i])
             let d1 = unit_toward(pts[i], pts[(i + 1) % n])
             let turn = math.acos(math.clamp(d0.dx * d1.dx + d0.dy * d1.dy, -1.0, 1.0))
@@ -512,7 +537,7 @@ fn dash_at(path: svgpath.SvgPath, pattern: [Float], offset: Float,
     var length = 0.0
     for run in runs
         length = length + run_length(run)
-    if length / cycle * list.len(pat) as Float > dash_piece_limit() as Float
+    if length / cycle * list.len(pat) as Float > (dash_piece_limit() as Float)
         return Err(RstBadDash)
     var cmds: [SvgPathCmd] = []
     for run in runs
@@ -531,8 +556,6 @@ fn run_length(run: svgpath.SvgSubpath) -> Float
 
 fn emit_dash(var cmds: [SvgPathCmd], cur: [GeomPointF])
     list.push(cmds, SvgMoveTo(cur[0].x, cur[0].y))
-    if list.len(cur) == 1
-        list.push(cmds, SvgLineTo(cur[0].x, cur[0].y))
     for i in 1..list.len(cur)
         list.push(cmds, SvgLineTo(cur[i].x, cur[i].y))
 

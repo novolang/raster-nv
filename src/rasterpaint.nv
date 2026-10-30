@@ -193,19 +193,19 @@ pub fn color_at(p: RstPaint, x: Float, y: Float) -> srgb.Srgba8 []
 // its axis.
 pub fn parameter_at(p: RstPaint, x: Float, y: Float) -> Float []
     match p
-        RstSolid(_)                                 => 0.0
-        RstLinear(x0, y0, x1, y1, _, _, _)          =>
+        RstSolid(_)                        => 0.0
+        RstLinear(x0, y0, x1, y1, _, _, _) =>
             let dx = x1 - x0
             let dy = y1 - y0
             let len_sq = dx * dx + dy * dy
             if len_sq <= 0.0
                 return 0.0
             ((x - x0) * dx + (y - y0) * dy) / len_sq
-        RstRadial(cx, cy, radius, _, _, _)          =>
+        RstRadial(cx, cy, radius, _, _, _) =>
             if radius <= 0.0
                 return 0.0
             math.hypot(x - cx, y - cy) / radius
-        RstSweep(cx, cy, start, _, _, _)            =>
+        RstSweep(cx, cy, start, _, _, _)   =>
             let turn = 2.0 * math.pi()
             let a = math.atan2(y - cy, x - cx) - start
             let t = (a - turn * math.floor(a / turn)) / turn
@@ -216,10 +216,10 @@ pub fn parameter_at(p: RstPaint, x: Float, y: Float) -> Float []
 // The stop list, empty for a solid paint.
 pub fn stops_of(p: RstPaint) -> [colormix.ColorStop] []
     match p
-        RstSolid(_)                  => []
+        RstSolid(_)                    => []
         RstLinear(_, _, _, _, s, _, _) => list.clone(s)
-        RstRadial(_, _, _, s, _, _)  => list.clone(s)
-        RstSweep(_, _, _, s, _, _)   => list.clone(s)
+        RstRadial(_, _, _, s, _, _)    => list.clone(s)
+        RstSweep(_, _, _, s, _, _)     => list.clone(s)
 
 // Whether the paint's geometry is usable.
 //
@@ -246,16 +246,16 @@ pub fn transformed(p: RstPaint, t: geomxform.GeomXform) -> Result<RstPaint, rast
     if not geomxform.is_invertible(t)
         return Err(RstSingularTransform)
     match p
-        RstSolid(_)                                      => Ok(p)
-        RstLinear(x0, y0, x1, y1, s, sp, spread)         =>
+        RstSolid(_)                              => Ok(p)
+        RstLinear(x0, y0, x1, y1, s, sp, spread) =>
             let a = geomxform.apply_point(t, geompoint.ptf(x0, y0))
             let b = geomxform.apply_point(t, geompoint.ptf(x1, y1))
             Ok(RstLinear(a.x, a.y, b.x, b.y, s, sp, spread))
-        RstRadial(cx, cy, radius, s, sp, spread)         =>
+        RstRadial(cx, cy, radius, s, sp, spread) =>
             let c = geomxform.apply_point(t, geompoint.ptf(cx, cy))
             Ok(RstRadial(c.x, c.y, radius * math.sqrt(math.abs(geomxform.determinant(t))), s, sp,
                          spread))
-        RstSweep(cx, cy, start, s, sp, spread)           =>
+        RstSweep(cx, cy, start, s, sp, spread)   =>
             let c = geomxform.apply_point(t, geompoint.ptf(cx, cy))
             let turn = math.atan2(t.b, t.a)
             if geomxform.determinant(t) > 0.0
@@ -338,6 +338,7 @@ pub fn ramp_position(p: RstPaint, x: Float, y: Float) -> Float []
 // ```
 pub fn ramp_packed(p: RstPaint, n: Int) -> [Int] []
     var out: [Int] = []
+    let space = space_of(p)
     match p
         RstSolid(c) =>
             for _ in 0..n
@@ -349,7 +350,7 @@ pub fn ramp_packed(p: RstPaint, n: Int) -> [Int] []
                     list.push(out, 0)
                 else
                     let t = i as Float / math.max(1.0, (n - 1) as Float)
-                    let c = colormix.sample(stops, t, space_of(p))
+                    let c = colormix.sample(stops, t, space)
                     list.push(out, (c.r << 24) | (c.g << 16) | (c.b << 8) | 255)
     out
 
@@ -484,15 +485,15 @@ fn mix_pixel(mode: RstBlend, s: RstPx, d: RstPx, cov: Float) -> RstPx
 
 fn mode_result(mode: RstBlend, s: RstPx, d: RstPx) -> RstPx
     match mode
-        RstOver     => RstPx { r: s.r + d.r * (1.0 - s.a), g: s.g + d.g * (1.0 - s.a),
+        RstOver    => RstPx { r: s.r + d.r * (1.0 - s.a), g: s.g + d.g * (1.0 - s.a),
                                b: s.b + d.b * (1.0 - s.a), a: s.a + d.a * (1.0 - s.a) }
-        RstSrcCopy  => s
-        RstSrcIn    => RstPx { r: s.r * d.a, g: s.g * d.a, b: s.b * d.a, a: s.a * d.a }
-        RstSrcOut   => RstPx { r: s.r * (1.0 - d.a), g: s.g * (1.0 - d.a), b: s.b * (1.0 - d.a),
+        RstSrcCopy => s
+        RstSrcIn   => RstPx { r: s.r * d.a, g: s.g * d.a, b: s.b * d.a, a: s.a * d.a }
+        RstSrcOut  => RstPx { r: s.r * (1.0 - d.a), g: s.g * (1.0 - d.a), b: s.b * (1.0 - d.a),
                                a: s.a * (1.0 - d.a) }
-        RstPlus     => RstPx { r: math.min(1.0, s.r + d.r), g: math.min(1.0, s.g + d.g),
+        RstPlus    => RstPx { r: math.min(1.0, s.r + d.r), g: math.min(1.0, s.g + d.g),
                                b: math.min(1.0, s.b + d.b), a: math.min(1.0, s.a + d.a) }
-        _           => RstPx { r: separable(mode, s.r, s.a, d.r, d.a),
+        _          => RstPx { r: separable(mode, s.r, s.a, d.r, d.a),
                                g: separable(mode, s.g, s.a, d.g, d.a),
                                b: separable(mode, s.b, s.a, d.b, d.a),
                                a: s.a + d.a - s.a * d.a }
@@ -510,14 +511,14 @@ fn separable(mode: RstBlend, cs: Float, sa: Float, cb: Float, da: Float) -> Floa
 // colour, both unassociated.
 fn blend_function(mode: RstBlend, cb: Float, cs: Float) -> Float
     match mode
-        RstMultiply   => cb * cs
-        RstScreen     => cb + cs - cb * cs
-        RstOverlay    =>
+        RstMultiply => cb * cs
+        RstScreen   => cb + cs - cb * cs
+        RstOverlay  =>
             if cb <= 0.5
                 2.0 * cb * cs
             else
                 let k = 2.0 * cb - 1.0
                 cs + k - cs * k
-        RstDarken     => math.min(cb, cs)
-        RstLighten    => math.max(cb, cs)
-        _             => math.abs(cb - cs)
+        RstDarken   => math.min(cb, cs)
+        RstLighten  => math.max(cb, cs)
+        _           => math.abs(cb - cs)

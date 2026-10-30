@@ -118,11 +118,12 @@ pub fn fill_all(paths: [svgpath.SvgPath], xform: geomxform.GeomXform, clip: geom
 // suite asserts.
 pub fn fill_rect(r: geomrect.GeomRectF, clip: geomrect.GeomRectI,
                  limits: rastermask.RstLimits) -> Result<rastermask.RstMask, rastererror.RstFault> []
-    let r = geomrect.normalize(r)
+    let r = geomrect.spanning(r.min, r.max)
     let box = box_for(r, clip)
     let m = match rastermask.mask(math.max(geomrect.width_i(box), 1), math.max(geomrect.height_i(box), 1),
                                   box.min.x, box.min.y, limits)
-        Err(e) => return Err(e)
+        Err(e)    =>
+            return Err(e)
         Ok(built) => built
     if geomrect.is_empty_i(box)
         return Ok(m)
@@ -282,7 +283,7 @@ fn polylines(path: svgpath.SvgPath, xform: geomxform.GeomXform,
     var start = cur
     for c in svgpath.commands_of(svgpath.transform(path, xform))
         match c
-            SvgMoveTo(x, y)         =>
+            SvgMoveTo(x, y) =>
                 if list.len(pts) > 1
                     list.push(runs, svgpath.SvgSubpath { points: pts, closed: false })
                 cur = pixel_point(x, y)
@@ -290,18 +291,18 @@ fn polylines(path: svgpath.SvgPath, xform: geomxform.GeomXform,
                 pts = [cur]
                 begun = true
                 live = true
-            SvgClosePath            =>
+            SvgClosePath    =>
                 if live
                     list.push(runs, svgpath.SvgSubpath { points: pts, closed: true })
                 cur = start
                 pts = [cur]
                 live = false
-            SvgLineTo(x, y)         =>
+            SvgLineTo(x, y) =>
                 if begun
                     cur = pixel_point(x, y)
                     list.push(pts, cur)
                     live = true
-            _                       =>
+            _               =>
                 if begun
                     let more = curve_points(cur, c, flatten)
                     for q in more
@@ -313,11 +314,14 @@ fn polylines(path: svgpath.SvgPath, xform: geomxform.GeomXform,
     runs
 
 // The segments a fill would sweep: every run's own segments and the one
-// that closes it.
+// that closes it, unless the run already ends where it began.
 fn count_edges(runs: [svgpath.SvgSubpath]) -> Int
     var n = 0
     for run in runs
-        n = n + list.len(run.points)
+        let last = list.len(run.points) - 1
+        n = n + last
+        if run.points[0].x != run.points[last].x or run.points[0].y != run.points[last].y
+            n = n + 1
     n
 
 // The bounds of every path through the transform, as floats.
@@ -356,9 +360,10 @@ fn fill_set(paths: [svgpath.SvgPath], xform: geomxform.GeomXform, clip: geomrect
         return Err(RstSingularTransform)
     let box = box_for(float_bounds(paths, xform), clip)
     let m = match rastermask.mask(math.max(geomrect.width_i(box), 1), math.max(geomrect.height_i(box), 1),
-                                  if geomrect.is_empty_i(box) then clip.min.x else box.min.x,
-                                  if geomrect.is_empty_i(box) then clip.min.y else box.min.y, limits)
-        Err(e)    => return Err(e)
+                                  (if geomrect.is_empty_i(box) then clip.min.x else box.min.x),
+                                  (if geomrect.is_empty_i(box) then clip.min.y else box.min.y), limits)
+        Err(e)    =>
+            return Err(e)
         Ok(built) => built
     if geomrect.is_empty_i(box)
         return Ok(m)
@@ -434,7 +439,7 @@ fn add_piece(var acc: [Float], stride: Int, h: Int, ax: Float, ay: Float, bx: Fl
         y0 = by
         x1 = ax
         y1 = ay
-    if y1 <= 0.0 or y0 >= h as Float
+    if y1 <= 0.0 or y0 >= (h as Float)
         return
     let dxdy = (x1 - x0) / (y1 - y0)
     var x = x0

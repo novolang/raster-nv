@@ -1,0 +1,402 @@
+// rasterpaint_tests.nv - what colour a covered pixel gets.
+//
+// Gradients in sRGB are checked against cairo, which interpolates them at
+// pixel centres; the Oklab ramp against the published Oklab formulas; the
+// blend modes against cairo's operators on premultiplied pixels (a result
+// agrees within two levels, the rounding of cairo's premultiplied storage).
+// Tests/oracle/vectors.py prints the vectors.
+
+use std.test
+use std.bytes
+use std.list
+use std.str
+use geompoint
+use geomxform
+use srgb
+use colormix
+use colorspace
+use rasterpaint
+use rastererror
+
+fn rgb(r: Int, g: Int, b: Int) -> srgb.Srgb8
+    srgb.rgb8(r, g, b)
+
+fn stops2(a: srgb.Srgb8, b: srgb.Srgb8) -> [colormix.ColorStop]
+    [colormix.ColorStop { at: 0.0, color: a }, colormix.ColorStop { at: 1.0, color: b }]
+
+fn red() -> srgb.Srgb8
+    rgb(255, 0, 0)
+
+fn blue() -> srgb.Srgb8
+    rgb(0, 0, 255)
+
+fn pixel(r: Int, g: Int, b: Int, a: Int) -> srgb.Srgba8
+    srgb.Srgba8 { rgb: rgb(r, g, b), a: a }
+
+fn gradient(spread: RstSpread, x0: Float, x1: Float) -> rasterpaint.RstPaint
+    RstLinear(x0, 0.0, x1, 0.0, stops2(red(), blue()), SpaceSrgb, spread)
+
+// The biggest channel difference between a paint sampled at the centres of
+// a w by h grid and the hex of rgb bytes cairo produced.
+fn worst(p: rasterpaint.RstPaint, w: Int, h: Int, want: Str) -> Int
+    let b = bytes.from_hex(want) ?? bytes.zeros(0)
+    var most = 0
+    for y in 0..h
+        for x in 0..w
+            let c = rasterpaint.color_at(p, x as Float + 0.5, y as Float + 0.5)
+            let at = (y * w + x) * 3
+            most = math.max(most, math.abs_int(c.rgb.r - (bytes.byte_at(b, at) ?? 0)))
+            most = math.max(most, math.abs_int(c.rgb.g - (bytes.byte_at(b, at + 1) ?? 0)))
+            most = math.max(most, math.abs_int(c.rgb.b - (bytes.byte_at(b, at + 2) ?? 0)))
+    most
+
+// A pixel's channels multiplied by its alpha, to compare with premultiplied storage.
+fn premultiplied(c: srgb.Srgba8) -> [Int]
+    [math.round(c.rgb.r as Float * c.a as Float / 255.0) as Int,
+     math.round(c.rgb.g as Float * c.a as Float / 255.0) as Int,
+     math.round(c.rgb.b as Float * c.a as Float / 255.0) as Int, c.a]
+
+fn mode_named(name: Str) -> RstBlend
+    for m in rasterpaint.modes_supported()
+        if rasterpaint.mode_name(m) == name
+            return m
+    RstOver
+
+fn number(s: Str) -> Int
+    str.to_int(s) ?? -1
+
+fn want_linear_pad() -> Str
+    "ff0000ff0000f4000bdf0020ca0035b5004a9f00608a007575008a60009f4a00b53500ca2000df0b00f40000ff0000ff"
+
+fn want_linear_repeat() -> Str
+    "60009f2000dfdf00209f006060009f2000dfdf00209f006060009f2000dfdf00209f006060009f2000dfdf00209f0060"
+
+fn want_linear_reflect() -> Str
+    "9f0060df0020df00209f006060009f2000df2000df60009f9f0060df0020df00209f006060009f2000df2000df60009f"
+
+fn want_three_stops() -> Str
+    "df20009f6000609f0020df0000f40b00df2000ca3500b54a009f60008a7500758a00609f004ab50035ca0020df000bf4"
+
+fn want_radial() -> Str
+    "1020301020301b2b3a2c3a482c3a481b2b3a1020301020301020302c3a48515c6867717b67717b515c682c3a481020301b2b3a515c68808991a1a7ada1a7ad808991515c681b2b3a2c3a4867717ba1a7add5d8dad5d8daa1a7ad67717b2c3a482c3a4867717ba1a7add5d8dad5d8daa1a7ad67717b2c3a481b2b3a515c68808991a1a7ada1a7ad808991515c681b2b3a1020302c3a48515c6867717b67717b515c682c3a481020301020301020301b2b3a2c3a482c3a481b2b3a102030102030"
+
+fn want_diagonal() -> Str
+    "ffff00fdfd00e6e705ced10ab7bb0f9fa513889018707a1dffff00e9eb04d2d509babf0ea3a9128b9317747d1c5c6721edef04d6d908bec30da7ad128f971678811b606b20495525dadc07c2c60cabb011939a167c851a646f1f4d5924354329c6ca0bafb410979e1580881a68721e515c2339462822302cb3b80f9ba214848c196c761e5560223d4a2726342c1020309fa513889018707a1d586421414e2629382b1222301020308b9317747d1c5c67214551252d3b2a16252f102030102030"
+
+fn want_oklab() -> Str
+    "fc3400f45d00ea7a00df9200d0a800bebd00a7d10087e30052f600"
+
+fn want_blends() -> Str
+    "source-over 200 100 50 255 30 220 90 255 200 100 50 255\nsource-over 200 100 50 128 30 220 90 255 115 160 70 255\nsource-over 30 220 90 64 250 10 130 200 154 60 98 214\nsource-over 250 10 130 200 255 255 255 0 196 7 102 200\nsource-over 255 255 255 255 0 0 0 128 255 255 255 255\ncopy 200 100 50 255 30 220 90 255 200 100 50 255\ncopy 200 100 50 128 30 220 90 255 100 50 25 128\ncopy 30 220 90 64 250 10 130 200 7 55 22 64\ncopy 250 10 130 200 255 255 255 0 196 7 102 200\ncopy 255 255 255 255 0 0 0 128 255 255 255 255\nsource-in 200 100 50 255 30 220 90 255 200 100 50 255\nsource-in 200 100 50 128 30 220 90 255 100 50 25 128\nsource-in 30 220 90 64 250 10 130 200 5 43 17 50\nsource-in 250 10 130 200 255 255 255 0 0 0 0 0\nsource-in 255 255 255 255 0 0 0 128 128 128 128 128\nsource-out 200 100 50 255 30 220 90 255 0 0 0 0\nsource-out 200 100 50 128 30 220 90 255 0 0 0 0\nsource-out 30 220 90 64 250 10 130 200 2 12 5 14\nsource-out 250 10 130 200 255 255 255 0 196 7 102 200\nsource-out 255 255 255 255 0 0 0 128 127 127 127 127\nplus-lighter 200 100 50 255 30 220 90 255 230 255 140 255\nplus-lighter 200 100 50 128 30 220 90 255 130 255 115 255\nplus-lighter 30 220 90 64 250 10 130 200 203 62 124 255\nplus-lighter 250 10 130 200 255 255 255 0 196 7 102 200\nplus-lighter 255 255 255 255 0 0 0 128 255 255 255 255\nmultiply 200 100 50 255 30 220 90 255 24 86 18 255\nmultiply 200 100 50 128 30 220 90 255 27 153 54 255\nmultiply 30 220 90 64 250 10 130 200 154 19 90 214\nmultiply 250 10 130 200 255 255 255 0 196 7 102 200\nmultiply 255 255 255 255 0 0 0 128 127 127 127 255\nscreen 200 100 50 255 30 220 90 255 206 234 122 255\nscreen 200 100 50 128 30 220 90 255 118 227 106 255\nscreen 30 220 90 64 250 10 130 200 198 60 115 214\nscreen 250 10 130 200 255 255 255 0 196 7 102 200\nscreen 255 255 255 255 0 0 0 128 255 255 255 255\noverlay 200 100 50 255 30 220 90 255 47 212 35 255\noverlay 200 100 50 128 30 220 90 255 38 216 62 255\noverlay 30 220 90 64 250 10 130 200 197 20 99 214\noverlay 250 10 130 200 255 255 255 0 196 7 102 200\noverlay 255 255 255 255 0 0 0 128 127 127 127 255\ndarken 200 100 50 255 30 220 90 255 30 100 50 255\ndarken 200 100 50 128 30 220 90 255 30 160 70 255\ndarken 30 220 90 64 250 10 130 200 154 19 98 214\ndarken 250 10 130 200 255 255 255 0 196 7 102 200\ndarken 255 255 255 255 0 0 0 128 127 127 127 255\nlighten 200 100 50 255 30 220 90 255 200 220 90 255\nlighten 200 100 50 128 30 220 90 255 115 220 90 255\nlighten 30 220 90 64 250 10 130 200 198 60 107 214\nlighten 250 10 130 200 255 255 255 0 196 7 102 200\nlighten 255 255 255 255 0 0 0 128 255 255 255 255\ndifference 200 100 50 255 30 220 90 255 170 120 40 255\ndifference 200 100 50 128 30 220 90 255 100 170 65 255\ndifference 30 220 90 64 250 10 130 200 192 58 89 214\ndifference 250 10 130 200 255 255 255 0 196 7 102 200\ndifference 255 255 255 255 0 0 0 128 255 255 255 255"
+
+@test
+fn test_the_short_forms_and_the_default_space() [io]
+    test.assert(rasterpaint.default_space() == SpaceOklab)
+    match rasterpaint.solid(rgb(1, 2, 3))
+        RstSolid(c) =>
+            test.assert_eq(c.a, 255)
+            test.assert_eq(c.rgb.g, 2)
+        _           => test.fail("a solid paint was not RstSolid")
+    match rasterpaint.solid_alpha(pixel(1, 2, 3, 77))
+        RstSolid(c) => test.assert_eq(c.a, 77)
+        _           => test.fail("a solid paint was not RstSolid")
+    match rasterpaint.linear(1.0, 2.0, 3.0, 4.0, red(), blue())
+        RstLinear(x0, y0, x1, y1, stops, space, spread) =>
+            test.assert_approx(x0 + y0 + x1 + y1, 10.0, 0.0000001)
+            test.assert_eq(list.len(stops), 2)
+            test.assert(space == SpaceOklab)
+            test.assert(spread == RstPad)
+        _                                               => test.fail("a linear paint was not RstLinear")
+    match rasterpaint.radial(1.0, 2.0, 3.0, red(), blue())
+        RstRadial(cx, cy, r, stops, space, spread) =>
+            test.assert_approx(cx + cy + r, 6.0, 0.0000001)
+            test.assert_approx(stops[1].at, 1.0, 0.0000001)
+            test.assert(space == SpaceOklab)
+            test.assert(spread == RstPad)
+        _                                          => test.fail("a radial paint was not RstRadial")
+
+@test
+fn test_reading_a_paint() [io]
+    let solid = rasterpaint.solid(red())
+    let ramp = rasterpaint.linear(0.0, 0.0, 10.0, 0.0, red(), blue())
+    test.assert(rasterpaint.is_solid(solid))
+    test.assert(rasterpaint.is_solid(ramp) == false)
+    test.assert(rasterpaint.is_solid(rasterpaint.radial(0.0, 0.0, 1.0, red(), blue())) == false)
+    test.case("a solid is opaque when its alpha is 255, a gradient always")
+    test.assert(rasterpaint.is_opaque(solid))
+    test.assert(rasterpaint.is_opaque(rasterpaint.solid_alpha(pixel(1, 2, 3, 254))) == false)
+    test.assert(rasterpaint.is_opaque(ramp))
+    test.case("stops come back in order, and a solid has none")
+    test.assert_eq(list.len(rasterpaint.stops_of(solid)), 0)
+    test.assert_eq(list.len(rasterpaint.stops_of(ramp)), 2)
+    test.assert_eq(rasterpaint.stops_of(ramp)[1].color.b, 255)
+    test.assert_eq(list.len(rasterpaint.stops_of(rasterpaint.radial(0.0, 0.0, 1.0, red(), blue()))), 2)
+    test.assert_eq(list.len(rasterpaint.stops_of(RstSweep(0.0, 0.0, 0.0, stops2(red(), blue()), SpaceSrgb, RstPad))),
+        2)
+    test.case("the stops are a copy")
+    var copy = rasterpaint.stops_of(ramp)
+    list.push(copy, colormix.ColorStop { at: 2.0, color: red() })
+    test.assert_eq(list.len(rasterpaint.stops_of(ramp)), 2)
+
+@test
+fn test_whether_the_geometry_is_usable() [io]
+    test.assert(rasterpaint.is_usable(rasterpaint.solid(red())))
+    test.assert(rasterpaint.is_usable(rasterpaint.linear(0.0, 0.0, 1.0, 0.0, red(), blue())))
+    test.assert(rasterpaint.is_usable(rasterpaint.linear(0.0, 0.0, 0.0, 1.0, red(), blue())))
+    test.assert(rasterpaint.is_usable(rasterpaint.linear(5.0, 5.0, 5.0, 5.0, red(), blue())) == false)
+    test.assert(rasterpaint.is_usable(rasterpaint.radial(0.0, 0.0, 1.0, red(), blue())))
+    test.assert(rasterpaint.is_usable(rasterpaint.radial(0.0, 0.0, 0.0, red(), blue())) == false)
+    test.assert(rasterpaint.is_usable(rasterpaint.radial(0.0, 0.0, -2.0, red(), blue())) == false)
+    test.assert(rasterpaint.is_usable(RstSweep(1.0, 1.0, 0.0, stops2(red(), blue()), SpaceSrgb, RstPad)))
+
+@test
+fn test_the_gradient_parameter() [io]
+    let ramp = rasterpaint.linear(10.0, 0.0, 30.0, 0.0, red(), blue())
+    test.assert_approx(rasterpaint.parameter_at(ramp, 20.0, 99.0), 0.5, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(ramp, 10.0, 0.0), 0.0, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(ramp, 30.0, 0.0), 1.0, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(ramp, 40.0, 0.0), 1.5, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(ramp, 0.0, 0.0), -0.5, 0.0000001)
+    test.case("along a slanted axis it is the projection")
+    let slant = rasterpaint.linear(0.0, 0.0, 3.0, 4.0, red(), blue())
+    test.assert_approx(rasterpaint.parameter_at(slant, 1.5, 2.0), 0.5, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(slant, 4.0, -3.0), 0.0, 0.0000001)
+    test.case("a radial parameter is the distance over the radius")
+    let disc = rasterpaint.radial(5.0, 5.0, 10.0, red(), blue())
+    test.assert_approx(rasterpaint.parameter_at(disc, 5.0, 5.0), 0.0, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(disc, 8.0, 9.0), 0.5, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(disc, 5.0, 25.0), 2.0, 0.0000001)
+    test.case("a sweep goes round once from its start angle")
+    let sweep = RstSweep(0.0, 0.0, 0.0, stops2(red(), blue()), SpaceSrgb, RstPad)
+    test.assert_approx(rasterpaint.parameter_at(sweep, 1.0, 0.0), 0.0, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(sweep, 0.0, 1.0), 0.25, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(sweep, -1.0, 0.0), 0.5, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(sweep, 0.0, -1.0), 0.75, 0.0000001)
+    let turned = RstSweep(0.0, 0.0, math.pi() / 2.0, stops2(red(), blue()), SpaceSrgb, RstPad)
+    test.assert_approx(rasterpaint.parameter_at(turned, 0.0, 1.0), 0.0, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(turned, 1.0, 0.0), 0.75, 0.0000001)
+    test.case("an angle that rounds up to a whole turn is the start")
+    test.assert_approx(rasterpaint.parameter_at(sweep, 1.0, -0.0000000000000001), 0.0, 0.0000001)
+    test.case("a solid has no parameter, and a degenerate gradient answers 0")
+    test.assert_approx(rasterpaint.parameter_at(rasterpaint.solid(red()), 3.0, 3.0), 0.0, 0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(rasterpaint.linear(2.0, 2.0, 2.0, 2.0, red(), blue()), 7.0, 7.0),
+        0.0,
+        0.0000001)
+    test.assert_approx(rasterpaint.parameter_at(rasterpaint.radial(2.0, 2.0, 0.0, red(), blue()), 7.0, 7.0),
+        0.0,
+        0.0000001)
+
+@test
+fn test_gradients_in_srgb_agree_with_cairo() [io]
+    test.case("a two-stop ramp that pads at both ends")
+    test.assert(worst(gradient(RstPad, 2.0, 14.0), 16, 1, want_linear_pad()) <= 1)
+    test.case("repeat and reflect")
+    test.assert(worst(gradient(RstRepeat, 2.0, 6.0), 16, 1, want_linear_repeat()) <= 1)
+    test.assert(worst(gradient(RstReflect, 2.0, 6.0), 16, 1, want_linear_reflect()) <= 1)
+    test.case("three stops, the middle one not half way")
+    let three = RstLinear(0.0, 0.0, 16.0, 0.0, [colormix.ColorStop { at: 0.0, color: red() },
+                                                colormix.ColorStop { at: 0.25, color: rgb(0, 255, 0) },
+                                                colormix.ColorStop { at: 1.0, color: blue() }],
+                                                SpaceSrgb, RstPad)
+    test.assert(worst(three, 16, 1, want_three_stops()) <= 1)
+    test.case("a diagonal axis")
+    let diag = RstLinear(1.0, 1.0, 7.0, 6.0, stops2(rgb(255, 255, 0), rgb(16, 32, 48)), SpaceSrgb, RstPad)
+    test.assert(worst(diag, 8, 8, want_diagonal()) <= 1)
+    test.case("a radial ramp")
+    let disc = RstRadial(4.0, 4.0, 4.0, stops2(rgb(255, 255, 255), rgb(16, 32, 48)), SpaceSrgb, RstPad)
+    test.assert(worst(disc, 8, 8, want_radial()) <= 1)
+
+@test
+fn test_oklab_is_the_default_interpolation() [io]
+    test.case("the Oklab ramp from red to green agrees with the published formulas")
+    let ramp = RstLinear(0.0, 0.0, 9.0, 0.0, stops2(red(), rgb(0, 255, 0)), SpaceOklab, RstPad)
+    test.assert(worst(ramp, 9, 1, want_oklab()) <= 1)
+    test.case("and it is not the sRGB ramp, which goes through a dark middle")
+    let srgb_ramp = RstLinear(0.0, 0.0, 9.0, 0.0, stops2(red(), rgb(0, 255, 0)), SpaceSrgb, RstPad)
+    test.assert(rasterpaint.color_at(ramp, 4.5, 0.0).rgb.r > rasterpaint.color_at(srgb_ramp, 4.5, 0.0).rgb.r + 10)
+    test.assert(rasterpaint.color_at(rasterpaint.linear(0.0, 0.0, 9.0, 0.0, red(), rgb(0, 255, 0)), 4.5, 0.0).rgb.r
+                == rasterpaint.color_at(ramp, 4.5, 0.0).rgb.r)
+
+@test
+fn test_a_sweep_takes_its_colours_round_the_centre() [io]
+    let sweep = RstSweep(10.0, 10.0, 0.0, [colormix.ColorStop { at: 0.0, color: red() },
+                                           colormix.ColorStop { at: 0.5, color: rgb(0, 255, 0) },
+                                           colormix.ColorStop { at: 1.0, color: blue() }],
+                                           SpaceSrgb, RstPad)
+    test.assert_eq(rasterpaint.color_at(sweep, 20.0, 10.0).rgb.r, 255)
+    test.assert_eq(rasterpaint.color_at(sweep, 0.0, 10.0).rgb.g, 255)
+    test.assert_eq(rasterpaint.color_at(sweep, 10.0, 0.0).rgb.b, 128)
+    test.assert_eq(rasterpaint.color_at(sweep, 10.0, 20.0).rgb.r, 128)
+    test.assert_eq(rasterpaint.color_at(sweep, 10.0, 20.0).a, 255)
+
+@test
+fn test_degenerate_stop_lists() [io]
+    test.case("no stops draw nothing")
+    let none = RstLinear(0.0, 0.0, 10.0, 0.0, [], SpaceSrgb, RstPad)
+    test.assert_eq(rasterpaint.color_at(none, 5.0, 0.0).a, 0)
+    test.assert_eq(rasterpaint.ramp_packed(none, 3)[1], 0)
+    test.case("one stop is a solid colour")
+    let one = RstLinear(0.0, 0.0, 10.0, 0.0, [colormix.ColorStop { at: 0.5, color: red() }], SpaceSrgb, RstPad)
+    test.assert_eq(rasterpaint.color_at(one, 0.0, 0.0).rgb.r, 255)
+    test.assert_eq(rasterpaint.color_at(one, 99.0, 0.0).rgb.r, 255)
+    test.case("stops out of order are put in order")
+    let jumbled = RstLinear(0.0, 0.0, 10.0, 0.0, [colormix.ColorStop { at: 1.0, color: blue() },
+                                                  colormix.ColorStop { at: 0.0, color: red() }],
+                                                  SpaceSrgb, RstPad)
+    test.assert_eq(rasterpaint.color_at(jumbled, 0.0, 0.0).rgb.r, 255)
+    test.assert_eq(rasterpaint.color_at(jumbled, 10.0, 0.0).rgb.b, 255)
+    test.case("two stops at one position make a hard edge")
+    let hard = RstLinear(0.0, 0.0, 10.0, 0.0, [colormix.ColorStop { at: 0.0, color: red() },
+                                               colormix.ColorStop { at: 0.5, color: red() },
+                                               colormix.ColorStop { at: 0.5, color: blue() },
+                                               colormix.ColorStop { at: 1.0, color: blue() }],
+                                               SpaceSrgb, RstPad)
+    test.assert_eq(rasterpaint.color_at(hard, 4.9, 0.0).rgb.r, 255)
+    test.assert_eq(rasterpaint.color_at(hard, 5.1, 0.0).rgb.b, 255)
+
+@test
+fn test_a_solid_paint_is_its_colour_everywhere() [io]
+    let p = rasterpaint.solid_alpha(pixel(10, 20, 30, 128))
+    test.assert_eq(rasterpaint.color_at(p, -100.0, 3.0).a, 128)
+    test.assert_eq(rasterpaint.color_at(p, 5.0, 5.0).rgb.b, 30)
+    test.assert_approx(rasterpaint.ramp_position(p, 5.0, 5.0), 0.0, 0.0000001)
+
+@test
+fn test_the_spread_outside_the_span() [io]
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstPad, 0.0, 10.0), 25.0, 0.0), 1.0, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstPad, 0.0, 10.0), -5.0, 0.0), 0.0, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstRepeat, 0.0, 10.0), 25.0, 0.0), 0.5, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstRepeat, 0.0, 10.0), -2.0, 0.0), 0.8, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstReflect, 0.0, 10.0), 12.0, 0.0), 0.8, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstReflect, 0.0, 10.0), 25.0, 0.0), 0.5, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(gradient(RstReflect, 0.0, 10.0), -3.0, 0.0), 0.3, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(RstRadial(0.0, 0.0, 5.0, stops2(red(), blue()), SpaceSrgb, RstReflect), 6.0, 0.0),
+                       0.8, 0.0000001)
+    test.assert_approx(rasterpaint.ramp_position(RstSweep(0.0, 0.0, 0.0, stops2(red(), blue()), SpaceSrgb, RstRepeat), 0.0, 1.0),
+                       0.25, 0.0000001)
+
+@test
+fn test_the_ramp_table() [io]
+    let p = gradient(RstPad, 0.0, 10.0)
+    let t = rasterpaint.ramp_packed(p, 5)
+    test.assert_eq(list.len(t), 5)
+    test.assert_eq(t[0], 0xFF0000FF)
+    test.assert_eq(t[4], 0x0000FFFF)
+    test.assert_eq(t[2], (128 << 24) | (0 << 16) | (128 << 8) | 255)
+    test.case("a table of one is the start of the ramp")
+    test.assert_eq(rasterpaint.ramp_packed(p, 1)[0], 0xFF0000FF)
+    test.case("a solid paint fills the table with its colour")
+    let s = rasterpaint.ramp_packed(rasterpaint.solid_alpha(pixel(1, 2, 3, 4)), 3)
+    test.assert_eq(list.len(s), 3)
+    test.assert_eq(s[2], 0x01020304)
+
+@test
+fn test_moving_a_paint_with_a_transform() [io]
+    test.case("a transform that collapses the plane is refused")
+    match rasterpaint.transformed(gradient(RstPad, 0.0, 10.0), geomxform.scaling(0.0, 1.0))
+        Ok(_)  => test.fail("a singular transform was accepted")
+        Err(e) => test.assert_eq_str(rastererror.describe(e), "the transform collapses the plane and cannot be inverted")
+    test.case("a solid paint does not move")
+    match rasterpaint.transformed(rasterpaint.solid(red()), geomxform.translation(5.0, 5.0))
+        Ok(p)  => test.assert(rasterpaint.is_solid(p))
+        Err(_) => test.fail("a translation was refused")
+    test.case("for a rotation, a scale and a shift the paint at the moved point is the paint at the point")
+    let moves = [geomxform.of_matrix(0.0, 2.0, -2.0, 0.0, 7.0, -3.0), geomxform.of_matrix(1.5, 0.0, 0.0, 1.5, -4.0, 9.0),
+                 geomxform.of_matrix(0.6, 0.8, -0.8, 0.6, 1.0, 1.0), geomxform.of_matrix(0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+                 geomxform.of_matrix(-2.0, 0.0, 0.0, 2.0, 5.0, 5.0)]
+    let paints = [RstLinear(2.0, 3.0, 12.0, 9.0, stops2(red(), blue()), SpaceSrgb, RstPad),
+                  RstRadial(5.0, 5.0, 8.0, stops2(red(), blue()), SpaceSrgb, RstPad),
+                  RstSweep(4.0, 6.0, 0.7, stops2(red(), blue()), SpaceSrgb, RstPad)]
+    let samples = [geompoint.ptf(3.0, 4.0),
+        geompoint.ptf(9.0, 7.5),
+        geompoint.ptf(-2.0, 1.0),
+        geompoint.ptf(6.0, 11.0)]
+    var worst_diff = 0
+    for t in moves
+        for p in paints
+            match rasterpaint.transformed(p, t)
+                Err(_)    => test.fail("a similarity was refused")
+                Ok(moved) =>
+                    for q in samples
+                        let there = geomxform.apply_point(t, q)
+                        let a = rasterpaint.color_at(p, q.x, q.y)
+                        let b = rasterpaint.color_at(moved, there.x, there.y)
+                        worst_diff = math.max(worst_diff,
+                            math.abs_int(a.rgb.r - b.rgb.r) + math.abs_int(a.rgb.b - b.rgb.b))
+    test.assert(worst_diff <= 2)
+
+@test
+fn test_the_blend_modes_agree_with_cairo() [io]
+    var checked = 0
+    for line in str.lines(want_blends())
+        let f = str.split(line, " ")
+        if list.len(f) == 13
+            let mode = mode_named(f[0])
+            let got = premultiplied(rasterpaint.blend(mode, pixel(number(f[1]), number(f[2]), number(f[3]), number(f[4])),
+                                                      pixel(number(f[5]), number(f[6]), number(f[7]), number(f[8]))))
+            for k in 0..4
+                test.assert(math.abs_int(got[k] - number(f[9 + k])) <= 2)
+            checked = checked + 1
+    test.assert_eq(checked, 55)
+
+@test
+fn test_blending_at_the_extremes() [io]
+    let clear = srgb.transparent()
+    test.case("nothing over nothing is nothing")
+    for m in rasterpaint.modes_supported()
+        test.assert_eq(rasterpaint.blend(m, clear, clear).a, 0)
+    test.case("a half-transparent white over nothing is a white, not a grey")
+    let white_half = pixel(255, 255, 255, 128)
+    test.assert_eq(rasterpaint.blend(RstOver, white_half, clear).rgb.r, 255)
+    test.assert_eq(rasterpaint.blend(RstOver, white_half, clear).a, 128)
+    test.assert_eq(rasterpaint.blend(RstOver, pixel(9, 8, 7, 255), pixel(1, 2, 3, 255)).rgb.g, 8)
+    test.assert_eq(rasterpaint.blend(RstSrcCopy, clear, pixel(1, 2, 3, 255)).a, 0)
+    test.case("blend_over is the over mode")
+    let s = pixel(200, 100, 50, 128)
+    let d = pixel(30, 220, 90, 255)
+    let o = rasterpaint.blend_over(s, d)
+    test.assert(srgb.same_pixel(o, rasterpaint.blend(RstOver, s, d)))
+    test.assert(o.rgb.r > 100 and o.rgb.r < 130)
+
+@test
+fn test_a_blend_taken_part_way_by_coverage() [io]
+    let ink = 0x000000FF
+    let paper = 0xFFFFFFFF
+    test.assert_eq(rasterpaint.blend_packed(RstOver, ink, paper, 0), paper)
+    test.assert_eq(rasterpaint.blend_packed(RstOver, ink, paper, 255), ink)
+    test.case("half way between white and black is a mid grey in the encoded values")
+    let half = rasterpaint.blend_packed(RstOver, ink, paper, 128)
+    test.assert_eq((half >> 24) & 255, 127)
+    test.assert_eq(half & 255, 255)
+    test.case("coverage times alpha is the same as a smaller alpha")
+    let a = rasterpaint.blend_packed(RstOver, 0x00000080, paper, 255)
+    let b = rasterpaint.blend_packed(RstOver, 0x000000FF, paper, 128)
+    test.assert(math.abs_int(((a >> 24) & 255) - ((b >> 24) & 255)) <= 1)
+    test.case("a mode that removes alpha takes it away only where it covers")
+    test.assert_eq(rasterpaint.blend_packed(RstSrcCopy, 0x00000000, paper, 255), 0)
+    test.assert_eq(rasterpaint.blend_packed(RstSrcCopy, 0x00000000, paper, 0), paper)
+
+@test
+fn test_which_modes_remove_opacity() [io]
+    test.assert(rasterpaint.reduces_alpha(RstSrcCopy))
+    test.assert(rasterpaint.reduces_alpha(RstSrcIn))
+    test.assert(rasterpaint.reduces_alpha(RstSrcOut))
+    test.assert(rasterpaint.reduces_alpha(RstOver) == false)
+    test.assert(rasterpaint.reduces_alpha(RstPlus) == false)
+    test.assert(rasterpaint.reduces_alpha(RstMultiply) == false)
+    test.assert(rasterpaint.reduces_alpha(RstDifference) == false)
+
+@test
+fn test_the_modes_and_their_names() [io]
+    let modes = rasterpaint.modes_supported()
+    test.assert_eq(list.len(modes), 11)
+    var names: [Str] = []
+    for m in modes
+        list.push(names, rasterpaint.mode_name(m))
+    test.assert_eq_str(list.join(names, " "),
+                       "source-over copy source-in source-out plus-lighter multiply screen overlay darken lighten difference")
+
+@test
+fn test_a_coverage_too_small_to_show_leaves_nothing() [io]
+    test.assert_eq(rasterpaint.blend_packed(RstOver, 0x00000001, 0x00000000, 1), 0)
+    test.assert_eq(rasterpaint.blend_packed(RstOver, 0x000000FF, 0x00000000, 0), 0)

@@ -1,237 +1,559 @@
-// rasterdraw_tests.nv — strokes, paints, compositing, and the glyph
-// cache the caller holds.
+// rasterdraw_tests.nv - compositing: a mask, a paint, and an image the
+// caller owns.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: raster-nv.<module>.<fn>`.
-//
-// THE THREE ASSERTIONS THIS SUITE EXISTS FOR:
-//
-//   a stroke outline is filled NON-ZERO, because its two offsets run
-//   in opposite directions and an even-odd fill hollows out every
-//   join;
-//
-//   a glyph cache is keyed on an INTEGER size and a subpixel column —
-//   a cache keyed on a float misses every time and grows without
-//   bound, which is the failure that looks like a memory leak;
-//
-//   and a paint's alpha MULTIPLIES the mask's coverage rather than
-//   overriding it, which is what keeps a transparent shape's edges
-//   soft.
+// A filled path over a flat background is checked against cairo's fill with
+// the same operator (tests/oracle/vectors.py prints the vectors; an edge
+// pixel can differ by the 17 levels cairo's fifteen sub-scanlines quantise
+// to, the interior agrees exactly).  The rest is values worked out by hand:
+// what lands on which pixel, which pixel kinds can be drawn into, and that
+// the image the caller handed over is left as it was.
 
 use std.test
-use std.list
 use std.bytes
-use geomrect
+use std.list
 use geompoint
+use geomrect
+use geomxform
 use image
 use srgb
+use colormix
 use svgpath
 use rastermask
-use rasterstroke
+use rasterfill
 use rasterpaint
+use rasterstroke
 use rasterdraw
-use rasterglyph
+use rastererror
 
-fn line() -> svgpath.SvgPath
-    svgpath.line_to(svgpath.move_to(svgpath.empty(), 2.0, 8.0), 30.0, 8.0)
+fn px(r: Int, g: Int, b: Int, a: Int) -> srgb.Srgba8
+    srgb.Srgba8 { rgb: srgb.rgb8(r, g, b), a: a }
 
-fn blue() -> srgb.Srgb8
-    Srgb8 { r: 0, g: 0, b: 255 }
+fn white() -> srgb.Srgba8
+    px(255, 255, 255, 255)
 
-fn red() -> srgb.Srgb8
-    Srgb8 { r: 255, g: 0, b: 0 }
+fn black() -> srgb.Srgba8
+    px(0, 0, 0, 255)
 
-@test
-fn test_a_stroke_is_a_path_and_its_fill_rule_is_not_a_choice() [io]
-    test.case("THE CLAIM: stroking answers a PATH, so it can be measured and written out")
-    match rasterstroke.outline(line(), rasterstroke.solid(4.0))
-        Err(_)  => test.assert(false)
-        Ok(ink) =>
-            test.assert(svgpath.command_count(ink) > svgpath.command_count(line()))
-            test.assert(geomrect.height(svgpath.bounds(ink)) >= 4.0)
+fn blue() -> srgb.Srgba8
+    px(0, 0, 255, 255)
 
-    test.case("and there is ONE rule it may be filled with, published as a value")
-    test.assert(rasterstroke.fill_rule() == GeomNonZero)
+fn canvas(w: Int, h: Int) -> Image
+    image.filled(w, h, PixRgba8, white())
 
-    test.case("because even-odd would hollow out every place the outline overlaps itself")
-    test.assert(rasterstroke.fill_rule() != GeomEvenOdd)
+fn at(img: Image, x: Int, y: Int) -> srgb.Srgba8
+    image.pixel(img, x, y) ?? px(-1, -1, -1, -1)
 
-@test
-fn test_the_zero_width_case_is_answered_by_name_rather_than_silently_picked() [io]
-    test.case("THE CLAIM: SVG says width 0 draws nothing, PostScript says one pixel")
-    test.assert(rasterstroke.solid(0.0).width == 0.0)
-    test.assert(rasterstroke.is_hairline(rasterstroke.solid(0.0)) == false)
+fn same(a: srgb.Srgba8, b: srgb.Srgba8) -> Bool
+    srgb.same_pixel(a, b)
 
-    test.case("so the other reading is a NAMED call rather than a silent reinterpretation")
-    test.assert(rasterstroke.is_hairline(rasterstroke.hairline()))
+fn unwrap(r: Result<Image, rastererror.RstFault>) -> Image
+    match r
+        Ok(img) => img
+        Err(_)  => image.new(1, 1, PixRgba8)
 
-@test
-fn test_dashing_is_path_to_path_so_it_composes_with_stroking() [io]
-    test.case("THE CLAIM: dash cuts the path, then stroke offsets the pieces")
-    match rasterstroke.dash(line(), [4.0, 2.0], 0.0)
-        Err(_) => test.assert(false)
-        Ok(d)  => test.assert(svgpath.subpath_count(d) > 1)
+fn fault_of(r: Result<Image, rastererror.RstFault>) -> Str
+    match r
+        Ok(_)  => "no fault"
+        Err(e) => rastererror.describe(e)
 
-    test.case("a pattern that cannot advance is refused, because the loop would not end")
-    test.assert(rasterstroke.dash_is_usable([]) == false)
-    test.assert(rasterstroke.dash_is_usable([0.0, 0.0]) == false)
-    test.assert(rasterstroke.dash_is_usable([4.0, 2.0]))
-    match rasterstroke.dash(line(), [], 0.0)
-        Ok(_)  => test.assert(false)
-        Err(e) => test.assert(e.message() != "")
+fn opts(w: Int, h: Int) -> rasterdraw.RstDrawOpts
+    rasterdraw.opts(w, h)
 
-@test
-fn test_a_stroke_reaches_further_than_half_its_width_at_a_sharp_corner() [io]
-    let sharp = svgpath.of_points([geompoint.ptf(0.0, 0.0), geompoint.ptf(20.0, 0.0),
-                                   geompoint.ptf(0.0, 1.0)],
-                                   false)
-    let style = rasterstroke.solid(4.0)
+fn id() -> geomxform.GeomXform
+    geomxform.identity()
 
-    test.case("THE CLAIM: the miter spike is why stroked bounds are not bounds + width/2")
-    let b = rasterstroke.stroked_bounds(sharp, style)
-    test.assert(geomrect.width(b) > geomrect.width(svgpath.bounds(sharp)) + 4.0)
+fn rect_path(x0: Float, y0: Float, x1: Float, y1: Float) -> svgpath.SvgPath
+    svgpath.of_rect(geomrect.of_corners(geompoint.ptf(x0, y0), geompoint.ptf(x1, y1)), 0.0, 0.0)
 
-    test.case("and the miter limit is what stops it growing without bound")
-    test.assert(rasterstroke.miter_extent(0.05) > 4.0)
-    test.assert(rasterstroke.miter_becomes_bevel(0.05, 4.0))
-    test.assert(rasterstroke.miter_becomes_bevel(1.5, 4.0) == false)
+fn full(w: Int, h: Int, ox: Int, oy: Int) -> rastermask.RstMask
+    match rastermask.full(w, h, ox, oy, rastermask.default_limits())
+        Ok(m)  => m
+        Err(_) => RstMask { width: 1, height: 1, origin_x: 0, origin_y: 0, coverage: bytes.zeros(1) }
 
-    test.case("hit testing a thin line is distance to a segment, not a filled outline")
-    test.assert(rasterstroke.stroke_contains(line(), style, 10.0, 8.0))
-    test.assert(rasterstroke.stroke_contains(line(), style, 10.0, 40.0) == false)
+fn mask_from(w: Int, h: Int, ox: Int, oy: Int, hex: Str) -> rastermask.RstMask
+    RstMask { width: w,
+        height: h,
+        origin_x: ox,
+        origin_y: oy,
+        coverage: bytes.from_hex(hex) ?? bytes.zeros(0) }
 
-@test
-fn test_a_paints_alpha_multiplies_the_coverage_rather_than_replacing_it() [io]
-    let half = rasterpaint.solid_alpha(Srgba8 { rgb: blue(), a: 128 })
+// The biggest difference between an image's red, green and blue and the hex
+// of the rgb bytes cairo produced.
+fn worst(img: Image, want: Str) -> Int
+    let b = bytes.from_hex(want) ?? bytes.zeros(0)
+    var most = 0
+    for y in 0..img.height
+        for x in 0..img.width
+            let c = at(img, x, y)
+            let o = (y * img.width + x) * 3
+            most = math.max(most, math.abs_int(c.rgb.r - (bytes.byte_at(b, o) ?? 0)))
+            most = math.max(most, math.abs_int(c.rgb.g - (bytes.byte_at(b, o + 1) ?? 0)))
+            most = math.max(most, math.abs_int(c.rgb.b - (bytes.byte_at(b, o + 2) ?? 0)))
+    most
 
-    test.case("THE CLAIM: a half-transparent paint through a half-covered pixel is a quarter")
-    test.assert(rasterpaint.is_solid(half))
-    test.assert(rasterpaint.is_opaque(half) == false)
-    test.assert(rasterpaint.color_at(half, 0.0, 0.0).a == 128)
+fn want_over_rect() -> Str
+    "faf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01edbdd33bbcb48bbcb48bbcb48bbcb48bbcb48bbcb48bbcb48bbcb48eae729faf01efaf01ebbcb487da5737da5737da5737da5737da5737da5737da5737da573dbdd33faf01efaf01ebbcb487da5737da5737da5737da5737da5737da5737da5737da573dbdd33faf01efaf01ebbcb487da5737da5737da5737da5737da5737da5737da5737da573dbdd33faf01efaf01ebbcb487da5737da5737da5737da5737da5737da5737da5737da573dbdd33faf01efaf01ebbcb487da5737da5737da5737da5737da5737da5737da5737da573dbdd33faf01efaf01ebbcb487da5737da5737da5737da5737da5737da5737da5737da573dbdd33faf01efaf01ecbd43e9cb85e9cb85e9cb85e9cb85e9cb85e9cb85e9cb85e9cb85ee2e12efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01efaf01e"
 
-    test.case("an opaque solid is the compositor's early exit")
-    test.assert(rasterpaint.is_opaque(rasterpaint.solid(blue())))
+fn want_multiply_triangle() -> Str
+    "fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864c2ad64afa464bfac64cdb364dcba64ebc164fac864fac864fac864fac864fac864fac864c2ae643b6e643b6e643b6e643b6e643b6e643d6e644d76645b7d64d0b464fac864fac864f9c8645e7e643b6e643b6e643b6e643b6e643b6e643b6e64678364f9c864fac864fac864fac864b3a6643b6e643b6e643b6e643b6e643b6e643d6e64d6b664fac864fac864fac864fac864f6c6645179643b6e643b6e643b6e643b6e648a9364fac864fac864fac864fac864fac864fac864a29f643b6e643b6e643b6e64497464ebc164fac864fac864fac864fac864fac864fac864f0c3644774643b6e643b6e64aca364fac864fac864fac864fac864fac864fac864fac864fac8649498643b6e645f7f64f8c864fac864fac864fac864fac864fac864fac864fac864fac864e8c064417164cbb264fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864c2ad64fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864fac864"
+
+fn want_screen_rect() -> Str
+    "143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c6434516854686c54686c54686c54686c54686c54686c54686c54686c244766143c64143c6454686c939273939273939273939273939273939273939273939273345168143c64143c6454686c939273939273939273939273939273939273939273939273345168143c64143c6454686c939273939273939273939273939273939273939273939273345168143c64143c6454686c939273939273939273939273939273939273939273939273345168143c64143c6454686c939273939273939273939273939273939273939273939273345168143c64143c6454686c939273939273939273939273939273939273939273939273345168143c64143c64445d69747d70747d70747d70747d70747d70747d70747d70747d702c4c67143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64143c64"
+
+fn want_copy_rect() -> Str
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffc7e5d68ecaac8ecaac8ecaac8ecaac8ecaac8ecaac8ecaac8ecaace3f2eaffffffffffff8ecaac1e965a1e965a1e965a1e965a1e965a1e965a1e965a1e965ac7e5d6ffffffffffff8ecaac1e965a1e965a1e965a1e965a1e965a1e965a1e965a1e965ac7e5d6ffffffffffff8ecaac1e965a1e965a1e965a1e965a1e965a1e965a1e965a1e965ac7e5d6ffffffffffff8ecaac1e965a1e965a1e965a1e965a1e965a1e965a1e965a1e965ac7e5d6ffffffffffff8ecaac1e965a1e965a1e965a1e965a1e965a1e965a1e965a1e965ac7e5d6ffffffffffff8ecaac1e965a1e965a1e965a1e965a1e965a1e965a1e965a1e965ac7e5d6ffffffffffffaad7c156b08356b08356b08356b08356b08356b08356b08356b083d5ebe0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
 @test
-fn test_a_gradient_interpolates_in_oklab_unless_a_caller_says_otherwise() [io]
-    let g = rasterpaint.linear(0.0, 0.0, 100.0, 0.0, red(), blue())
-
-    test.case("THE CLAIM: sRGB interpolation is the muddy middle, and is not the default")
-    test.assert(rasterpaint.default_space() == SpaceOklab)
-    test.assert(rasterpaint.is_solid(g) == false)
-    test.assert(list.len(rasterpaint.stops_of(g)) == 2)
-
-    test.case("the parameter is 0.5 exactly half way along the axis")
-    test.assert(rasterpaint.parameter_at(g, 50.0, 0.0) == 0.5)
-    test.assert(rasterpaint.parameter_at(g, 0.0, 0.0) == 0.0)
-
-    test.case("and a gradient whose two points coincide has no parameter anywhere")
-    let bad = rasterpaint.linear(5.0, 5.0, 5.0, 5.0, red(), blue())
-    test.assert(rasterpaint.is_usable(bad) == false)
-    test.assert(rasterpaint.is_usable(g))
-
-    test.case("a one-stop gradient is a solid colour, which is NOT an error")
-    test.assert(rasterpaint.is_usable(rasterpaint.solid(red())))
-
-@test
-fn test_the_blend_modes_that_can_remove_opacity_are_named() [io]
-    test.case("THE CLAIM: a layer drawn with additive modes can be accumulated in any order")
-    test.assert(rasterpaint.reduces_alpha(RstOver) == false)
-    test.assert(rasterpaint.reduces_alpha(RstMultiply) == false)
-
-    test.case("and the three that can take coverage AWAY are the ones that cannot")
-    test.assert(rasterpaint.reduces_alpha(RstSrcCopy))
-    test.assert(rasterpaint.reduces_alpha(RstSrcIn))
-    test.assert(rasterpaint.reduces_alpha(RstSrcOut))
-
-    test.case("the mode names are CSS's, so an SVG's mix-blend-mode matches without a table")
-    test.assert(rasterpaint.mode_name(RstOver) == "source-over")
-    test.assert(rasterpaint.mode_name(RstMultiply) == "multiply")
-    test.assert(list.len(rasterpaint.modes_supported()) >= 10)
-
-    test.case("and source-over at one pixel agrees with color-nv's own")
-    let opaque = Srgba8 { rgb: red(), a: 255 }
-    test.assert(rasterpaint.blend_over(opaque, Srgba8 { rgb: blue(), a: 255 }).rgb.r == 255)
-    test.assert(rasterpaint.blend(RstOver, opaque, opaque).a == 255)
-
-@test
-fn test_the_caller_owns_the_image_and_gets_it_back() [io]
-    let img = image.new(32, 16, PixRgba8)
-    let o = rasterdraw.opts(32, 16)
-
-    test.case("THE CLAIM: no canvas, no context, no state between calls")
-    test.assert(rasterdraw.can_draw_into(img))
-    test.assert(list.len(rasterdraw.kinds_supported()) >= 4)
-
-    test.case("a fill takes an Image and answers one")
-    match rasterdraw.fill_rect(img, geomrect.of_xywh(0.0, 0.0, 4.0, 4.0),
-                               rasterpaint.solid(blue()), o)
-        Err(_)  => test.assert(false)
-        Ok(out) =>
-            test.assert(out.width == 32)
-            match image.pixel(out, 1, 1)
-                Some(px) => test.assert(px.rgb.b == 255)
-                None     => test.assert(false)
-
-    test.case("and a 16-bit image is refused by NAME rather than rounded twice")
-    test.assert(rasterdraw.can_draw_into(image.new(4, 4, PixRgba16)) == false)
-
-@test
-fn test_the_options_are_a_value_so_a_clip_cannot_be_left_set() [io]
-    let o = rasterdraw.opts(32, 16)
-
-    test.case("THE CLAIM: two draws with the same options are the same call")
-    test.assert(geomrect.width_i(o.clip_rect) == 32)
+fn test_the_options_are_a_value() [io]
+    let o = rasterdraw.opts(10, 6)
+    test.assert_eq(o.clip_rect.max.x, 10)
+    test.assert_eq(o.clip_rect.max.y, 6)
+    test.assert_eq(o.clip_rect.min.x, 0)
+    test.assert(o.blend == RstOver)
     test.assert(o.clip_mask == None)
-    test.assert(o.blend == RstOver)
-
-    test.case("and a changed option is a NEW value, not a mutation to remember to undo")
-    test.assert(rasterdraw.with_blend(o, RstMultiply).blend == RstMultiply)
-    test.assert(o.blend == RstOver)
-
-    test.case("a tile's options are the same thing confined to a rectangle")
-    test.assert(geomrect.width_i(rasterdraw.opts_at(geomrect.of_xywh_i(0, 0, 8, 8)).clip_rect)
-                == 8)
-
-@test
-fn test_a_mask_and_an_image_convert_both_ways_with_no_codec_involved() [io]
-    match rastermask.full(8, 8, 0, 0, rastermask.default_limits())
-        Err(_) => test.assert(false)
-        Ok(m)  =>
-            test.case("THE CLAIM: a mask IS an 8-bit greyscale image, in the same layout")
-            let g = rasterdraw.mask_to_image(m)
-            test.assert(g.kind == PixLuma8)
-            test.assert(bytes.len(g.samples) == 64)
-
-            test.case("and a decoded image's alpha is a coverage mask, which is why composite is public")
-            match rasterdraw.image_to_mask(image.new(8, 8, PixRgba8), 0, 0,
-                                           rastermask.default_limits())
-                Err(_)   => test.assert(false)
-                Ok(back) => test.assert(back.width == 8)
+    test.assert(geomxform.is_identity(o.paint_xform))
+    test.assert_approx(o.flatten.tolerance, 0.25, 0.0000001)
+    test.assert_eq(o.limits.max_pixels, 67108864)
+    let tile = rasterdraw.opts_at(geomrect.of_xywh_i(4, 5, 6, 7))
+    test.assert_eq(tile.clip_rect.min.x, 4)
+    test.assert_eq(tile.clip_rect.max.y, 12)
+    test.case("a shaped clip and a blend mode make new options and leave the old ones")
+    let clipped = rasterdraw.with_clip(o, full(2, 2, 0, 0))
+    test.assert(clipped.clip_mask != None)
+    test.assert(o.clip_mask == None)
+    let mult = rasterdraw.with_blend(clipped, RstMultiply)
+    test.assert(mult.blend == RstMultiply)
+    test.assert(clipped.blend == RstOver)
+    test.assert(mult.clip_mask != None)
+    test.assert_eq(mult.clip_rect.max.x, 10)
+    test.assert_eq(mult.limits.max_edges, o.limits.max_edges)
 
 @test
-fn test_the_glyph_cache_is_keyed_on_integers_and_belongs_to_the_caller() [io]
-    let c = rasterglyph.cache(64)
+fn test_the_pixel_kinds_that_can_be_drawn_into() [io]
+    test.assert_eq(list.len(rasterdraw.kinds_supported()), 4)
+    test.assert(list.contains(rasterdraw.kinds_supported(), PixRgba8))
+    test.assert(list.contains(rasterdraw.kinds_supported(), PixLuma8))
+    for k in [PixRgba8, PixRgb8, PixLumaAlpha8, PixLuma8]
+        test.assert(rasterdraw.can_draw_into(image.new(2, 2, k)))
+    for k in [PixRgba16, PixRgb16, PixLumaAlpha16, PixLuma16]
+        test.assert(rasterdraw.can_draw_into(image.new(2, 2, k)) == false)
+    test.case("a draw into one of the others names the kind it was given")
+    let o = opts(2, 2)
+    let solid = rasterpaint.solid(srgb.black())
+    test.assert_eq_str(fault_of(rasterdraw.composite(image.new(2, 2, PixRgba16), full(2, 2, 0, 0), solid, o)),
+                       "the pixel kind PixRgba16 cannot be drawn into")
+    test.assert_eq_str(fault_of(rasterdraw.fill_rect(image.new(2, 2, PixRgb16), geomrect.of_xywh(0.0, 0.0, 2.0, 2.0), solid, o)),
+                       "the pixel kind PixRgb16 cannot be drawn into")
+    test.assert_eq_str(fault_of(rasterdraw.clear(image.new(2, 2, PixLumaAlpha16), black(), o)),
+                       "the pixel kind PixLumaAlpha16 cannot be drawn into")
+    test.assert_eq_str(fault_of(rasterdraw.fill_path(image.new(2, 2, PixLuma16), rect_path(0.0, 0.0, 2.0, 2.0), solid, GeomNonZero, id(), o)),
+                       "the pixel kind PixLuma16 cannot be drawn into")
+    test.assert_eq_str(fault_of(rasterdraw.draw_image(image.new(2, 2, PixRgba16), canvas(1, 1), 0, 0, o)),
+                       "the pixel kind PixRgba16 cannot be drawn into")
 
-    test.case("THE CLAIM: three subpixel columns, which is what stops text jittering")
-    test.assert(rasterglyph.subpixel_steps() == 3)
+@test
+fn test_a_mask_composites_through_a_solid_paint() [io]
+    let img = canvas(8, 8)
+    let out = unwrap(rasterdraw.composite(img, full(4, 4, 2, 2), rasterpaint.solid(srgb.rgb8(0, 0, 255)), opts(8, 8)))
+    test.assert(same(at(out, 2, 2), blue()))
+    test.assert(same(at(out, 5, 5), blue()))
+    test.assert(same(at(out, 1, 1), white()))
+    test.assert(same(at(out, 6, 6), white()))
+    test.assert_eq(out.width, 8)
+    test.case("the image that went in is left as it was")
+    test.assert(same(at(img, 3, 3), white()))
+    test.case("coverage scales the paint: half of black over white is the mid grey of the encoded values")
+    let half = unwrap(rasterdraw.composite(img, mask_from(2, 1, 0, 0, "ff80"), rasterpaint.solid(srgb.black()), opts(8, 8)))
+    test.assert(same(at(half, 0, 0), black()))
+    test.assert(same(at(half, 1, 0), px(127, 127, 127, 255)))
+    test.case("a paint's alpha multiplies the coverage")
+    let quarter = unwrap(rasterdraw.composite(img, mask_from(1, 1, 0, 0, "80"), rasterpaint.solid_alpha(px(0, 0, 0, 128)), opts(8, 8)))
+    test.assert(math.abs_int(at(quarter, 0, 0).rgb.r - 191) <= 1)
 
-    test.case("a key holds the size in 1/64ths, because two Floats do not compare equal")
-    let k = rasterglyph.key_for(42, 0, 16.0, 10.0)
-    test.assert(k.size_64 == 1024)
-    test.assert(k.glyph == 42)
+@test
+fn test_a_mask_that_reaches_past_the_image_is_cut() [io]
+    let img = canvas(4, 4)
+    let o = opts(4, 4)
+    let solid = rasterpaint.solid(srgb.rgb8(0, 0, 255))
+    let out = unwrap(rasterdraw.composite(img, full(10, 10, -3, -3), solid, o))
+    test.assert(same(at(out, 0, 0), blue()))
+    test.assert(same(at(out, 3, 3), blue()))
+    test.assert_eq(out.width, 4)
+    let corner = unwrap(rasterdraw.composite(img, full(3, 3, 2, 2), solid, o))
+    test.assert(same(at(corner, 3, 3), blue()))
+    test.assert(same(at(corner, 1, 1), white()))
+    test.case("a mask wholly outside leaves the image alone")
+    let none = unwrap(rasterdraw.composite(img, full(2, 2, 10, 10), solid, o))
+    test.assert(same(at(none, 0, 0), white()))
+    test.assert_eq_str(bytes.to_hex(none.samples), bytes.to_hex(img.samples))
 
-    test.case("and the fractional pen position picks the column, rather than being rounded away")
-    test.assert(rasterglyph.key_for(42, 0, 16.0, 10.0).subpixel_x
-                != rasterglyph.key_for(42, 0, 16.0, 10.5).subpixel_x)
+@test
+fn test_the_clip_rectangle_and_the_shaped_clip_limit_a_draw() [io]
+    let img = canvas(8, 8)
+    let solid = rasterpaint.solid(srgb.rgb8(0, 0, 255))
+    test.case("the rectangle")
+    let tile = unwrap(rasterdraw.composite(img, full(8, 8, 0, 0), solid, rasterdraw.opts_at(geomrect.of_xywh_i(2, 3, 2, 2))))
+    test.assert(same(at(tile, 2, 3), blue()))
+    test.assert(same(at(tile, 3, 4), blue()))
+    test.assert(same(at(tile, 1, 3), white()))
+    test.assert(same(at(tile, 4, 4), white()))
+    test.assert(same(at(tile, 2, 5), white()))
+    test.case("a clip rectangle bigger than the image is held to the image")
+    test.assert(same(at(unwrap(rasterdraw.composite(img, full(8, 8, 0, 0), solid, rasterdraw.opts_at(geomrect.of_xywh_i(-5, -5, 50, 50)))),
+        7,
+        7),
+    blue()))
+    test.case("the shaped clip is intersected with the coverage")
+    let o = rasterdraw.with_clip(opts(8, 8), mask_from(3, 1, 1, 1, "ff80" + "00"))
+    let shaped = unwrap(rasterdraw.composite(img, full(8, 8, 0, 0), solid, o))
+    test.assert(same(at(shaped, 1, 1), blue()))
+    test.assert(math.abs_int(at(shaped, 2, 1).rgb.r - 127) <= 1)
+    test.assert(same(at(shaped, 3, 1), white()))
+    test.assert(same(at(shaped, 0, 1), white()))
+    test.assert(same(at(shaped, 1, 2), white()))
+    test.case("and it multiplies a half coverage by a half clip")
+    let both = unwrap(rasterdraw.composite(img, mask_from(1, 1, 1, 1, "80"), rasterpaint.solid(srgb.black()),
+                                           rasterdraw.with_clip(opts(8, 8), mask_from(1, 1, 1, 1, "80"))))
+    test.assert(math.abs_int(at(both, 1, 1).rgb.r - 191) <= 1)
 
-    test.case("the font id is the CALLER's number, so two fonts' glyph 42 cannot collide")
-    test.assert(rasterglyph.key_for(42, 0, 16.0, 10.0).font_id
-                != rasterglyph.key_for(42, 1, 16.0, 10.0).font_id)
+@test
+fn test_a_gradient_is_sampled_at_pixel_centres() [io]
+    let img = image.filled(8, 1, PixRgba8, white())
+    let ramp = RstLinear(0.0, 0.0, 8.0, 0.0, [colormix.ColorStop { at: 0.0, color: srgb.rgb8(255, 0, 0) },
+                                              colormix.ColorStop { at: 1.0, color: srgb.rgb8(0, 0, 255) }],
+                                              SpaceSrgb, RstPad)
+    let out = unwrap(rasterdraw.composite(img, full(8, 1, 0, 0), ramp, opts(8, 1)))
+    for x in 0..8
+        let want = rasterpaint.color_at(ramp, x as Float + 0.5, 0.5)
+        test.assert(math.abs_int(at(out, x, 0).rgb.r - want.rgb.r) <= 1)
+        test.assert(math.abs_int(at(out, x, 0).rgb.b - want.rgb.b) <= 1)
+    test.case("a paint transform moves the gradient and not the shape")
+    let moved = rasterdraw.RstDrawOpts { clip_rect: geomrect.of_xywh_i(0, 0, 8, 1), clip_mask: None, blend: RstOver,
+                                         paint_xform: geomxform.translation(4.0, 0.0), flatten: rasterfill.default_flatten(),
+                                         limits: rastermask.default_limits() }
+    let shifted = unwrap(rasterdraw.composite(img, full(8, 1, 0, 0), ramp, moved))
+    test.assert(math.abs_int(at(shifted, 4, 0).rgb.r - rasterpaint.color_at(ramp, 0.5, 0.5).rgb.r) <= 1)
+    test.assert(math.abs_int(at(shifted, 7, 0).rgb.b - rasterpaint.color_at(ramp, 3.5, 0.5).rgb.b) <= 1)
+    test.assert_eq(at(shifted, 0, 0).rgb.r, 255)
+    test.case("a gradient that replaces the pixels and covers them fully writes them straight")
+    let copy = unwrap(rasterdraw.composite(img, full(8, 1, 0, 0), ramp, rasterdraw.with_blend(opts(8, 1), RstSrcCopy)))
+    test.assert(math.abs_int(at(copy, 3, 0).rgb.r - rasterpaint.color_at(ramp, 3.5, 0.5).rgb.r) <= 1)
 
-    test.case("and the cache is a value that goes in and comes out")
-    test.assert(rasterglyph.cached_count(c) == 0)
-    test.assert(rasterglyph.is_cached(c, k) == false)
-    test.assert(rasterglyph.cached(c, k) == None)
-    test.assert(rasterglyph.cached_count(rasterglyph.cleared(c)) == 0)
-    test.assert(rasterglyph.cache_bytes(c) == 0)
+@test
+fn test_a_paint_that_cannot_be_drawn_is_refused() [io]
+    let img = canvas(4, 4)
+    let bad = rasterpaint.linear(2.0, 2.0, 2.0, 2.0, srgb.black(), srgb.white())
+    test.assert_eq_str(fault_of(rasterdraw.composite(img, full(4, 4, 0, 0), bad, opts(4, 4))),
+                       "the gradient has no direction: its points coincide or its radius is not positive")
+    let flat_paint_xform = rasterdraw.RstDrawOpts { clip_rect: geomrect.of_xywh_i(0, 0, 4, 4), clip_mask: None, blend: RstOver,
+                                                    paint_xform: geomxform.scaling(0.0, 1.0), flatten: rasterfill.default_flatten(),
+                                                    limits: rastermask.default_limits() }
+    let ok = rasterpaint.linear(0.0, 0.0, 4.0, 0.0, srgb.black(), srgb.white())
+    test.assert_eq_str(fault_of(rasterdraw.composite(img, full(4, 4, 0, 0), ok, flat_paint_xform)),
+                       "the transform collapses the plane and cannot be inverted")
+    test.case("a solid paint does not use its transform")
+    test.assert(same(at(unwrap(rasterdraw.composite(img, full(4, 4, 0, 0), rasterpaint.solid(srgb.black()), flat_paint_xform)),
+        1,
+        1),
+    black()))
+
+@test
+fn test_each_drawable_kind_takes_the_draw() [io]
+    let ink = rasterpaint.solid(srgb.rgb8(0, 0, 255))
+    test.case("without alpha the pixel stays opaque")
+    let rgb = unwrap(rasterdraw.composite(image.filled(2, 2, PixRgb8, white()), full(2, 2, 0, 0), ink, opts(2, 2)))
+    test.assert(same(at(rgb, 1, 1), blue()))
+    test.assert_eq(bytes.len(rgb.samples), 12)
+    let rgb_half = unwrap(rasterdraw.composite(image.filled(2, 2, PixRgb8, white()), mask_from(1, 1, 0, 0, "80"), ink, opts(2, 2)))
+    test.assert_eq(at(rgb_half, 0, 0).a, 255)
+    test.assert(math.abs_int(at(rgb_half, 0, 0).rgb.r - 127) <= 1)
+    test.case("a grey kind takes the luminance of the colour, as image-nv does")
+    let want = at(image.with_pixel(image.new(1, 1, PixLuma8), 0, 0, srgb.Srgba8 { rgb: srgb.rgb8(0, 0, 255), a: 255 }),
+        0,
+        0)
+    let grey = unwrap(rasterdraw.composite(image.filled(2, 2, PixLuma8, white()), full(2, 2, 0, 0), ink, opts(2, 2)))
+    test.assert_eq(at(grey, 0, 0).rgb.g, want.rgb.g)
+    test.assert_eq(at(grey, 0, 0).a, 255)
+    test.case("a partial coverage on a grey kind blends with the grey that was there")
+    let grey_half = unwrap(rasterdraw.composite(image.filled(2, 2, PixLuma8, white()), mask_from(1, 1, 0, 0, "80"),
+                                                rasterpaint.solid(srgb.black()), opts(2, 2)))
+    test.assert(math.abs_int(at(grey_half, 0, 0).rgb.r - 127) <= 1)
+    test.case("a grey colour on a grey kind is written as it is")
+    let g = unwrap(rasterdraw.composite(image.filled(2, 2, PixLuma8, black()),
+        full(2, 2, 0, 0),
+        rasterpaint.solid(srgb.rgb8(200, 200, 200)),
+        opts(2, 2)))
+    test.assert_eq(at(g, 0, 0).rgb.r, 200)
+    test.case("grey with alpha keeps the alpha")
+    let ga = unwrap(rasterdraw.composite(image.filled(2, 2, PixLumaAlpha8, px(255, 255, 255, 0)), full(2, 2, 0, 0),
+                                         rasterpaint.solid_alpha(px(100, 100, 100, 128)), opts(2, 2)))
+    test.assert_eq(at(ga, 0, 0).a, 128)
+    test.assert_eq(at(ga, 0, 0).rgb.r, 100)
+    let ga_colour = unwrap(rasterdraw.composite(image.filled(2, 2, PixLumaAlpha8, white()), full(2, 2, 0, 0), ink, opts(2, 2)))
+    test.assert_eq(at(ga_colour, 0, 0).rgb.g, want.rgb.g)
+    test.assert_eq(at(ga_colour, 0, 0).a, 255)
+    test.case("a kind with alpha takes a draw onto transparent")
+    let rgba = unwrap(rasterdraw.composite(image.new(2, 2, PixRgba8),
+        full(2, 2, 0, 0),
+        rasterpaint.solid_alpha(px(10, 20, 30, 100)),
+        opts(2, 2)))
+    test.assert(same(at(rgba, 0, 0), px(10, 20, 30, 100)))
+
+@test
+fn test_blend_modes_apply_through_the_options() [io]
+    let blue_ink = rasterpaint.solid(srgb.rgb8(0, 0, 255))
+    let red_ground = image.filled(2, 2, PixRgba8, px(255, 0, 0, 255))
+    test.assert(same(at(unwrap(rasterdraw.composite(red_ground, full(2, 2, 0, 0), blue_ink,
+                                                    rasterdraw.with_blend(opts(2, 2), RstMultiply))),
+                                                    0, 0),
+                                                    black()))
+    test.assert(same(at(unwrap(rasterdraw.composite(red_ground, full(2, 2, 0, 0), blue_ink,
+                                                    rasterdraw.with_blend(opts(2, 2), RstScreen))),
+                                                    0, 0),
+                                                    px(255, 0, 255, 255)))
+    test.case("source copy with a transparent source removes the pixel")
+    let gone = unwrap(rasterdraw.composite(red_ground, full(2, 2, 0, 0), rasterpaint.solid_alpha(px(0, 0, 0, 0)),
+                                           rasterdraw.with_blend(opts(2, 2), RstSrcCopy)))
+    test.assert_eq(at(gone, 0, 0).a, 0)
+    test.case("a half-transparent source copied is that source")
+    let half = unwrap(rasterdraw.composite(red_ground, full(2, 2, 0, 0), rasterpaint.solid_alpha(px(0, 0, 255, 128)),
+                                           rasterdraw.with_blend(opts(2, 2), RstSrcCopy)))
+    test.assert(same(at(half, 1, 1), px(0, 0, 255, 128)))
+
+@test
+fn test_a_filled_path_agrees_with_cairo() [io]
+    let rect = rect_path(1.5, 1.5, 10.25, 8.75)
+    let tri = svgpath.of_points([geompoint.ptf(1.25, 1.5), geompoint.ptf(10.5, 2.25), geompoint.ptf(5.5, 10.75)], true)
+    test.case("a translucent blue over a yellow")
+    let over = unwrap(rasterdraw.fill_path(image.filled(12, 12, PixRgba8, px(250, 240, 30, 255)), rect,
+                                           rasterpaint.solid_alpha(px(0, 90, 200, 128)), GeomNonZero, id(), opts(12, 12)))
+    test.assert(worst(over, want_over_rect()) <= 10)
+    test.assert(same(at(over, 5, 5), rasterpaint.blend_over(px(0, 90, 200, 128), px(250, 240, 30, 255))))
+    test.assert(same(at(over, 0, 0), px(250, 240, 30, 255)))
+    test.case("multiply, screen and copy")
+    let mult = unwrap(rasterdraw.fill_path(image.filled(12, 12, PixRgba8, px(250, 200, 100, 255)), tri,
+                                           rasterpaint.solid(srgb.rgb8(60, 140, 255)), GeomNonZero, id(),
+                                           rasterdraw.with_blend(opts(12, 12), RstMultiply)))
+    test.assert(worst(mult, want_multiply_triangle()) <= 10)
+    let screen = unwrap(rasterdraw.fill_path(image.filled(12, 12, PixRgba8, px(20, 60, 100, 255)), rect,
+                                             rasterpaint.solid_alpha(px(220, 180, 40, 160)), GeomNonZero, id(),
+                                             rasterdraw.with_blend(opts(12, 12), RstScreen)))
+    test.assert(worst(screen, want_screen_rect()) <= 10)
+    let copy = unwrap(rasterdraw.fill_path(image.filled(12, 12, PixRgba8, white()), rect,
+                                           rasterpaint.solid(srgb.rgb8(30, 150, 90)), GeomNonZero, id(),
+                                           rasterdraw.with_blend(opts(12, 12), RstSrcCopy)))
+    test.assert(worst(copy, want_copy_rect()) <= 10)
+
+@test
+fn test_the_fill_transform_and_the_budget_reach_the_sweep() [io]
+    let img = canvas(8, 8)
+    let ink = rasterpaint.solid(srgb.black())
+    let scaled = unwrap(rasterdraw.fill_path(img, rect_path(0.0, 0.0, 1.0, 1.0), ink, GeomNonZero, geomxform.scaling(4.0, 4.0), opts(8, 8)))
+    test.assert(same(at(scaled, 3, 3), black()))
+    test.assert(same(at(scaled, 4, 4), white()))
+    test.assert_eq_str(fault_of(rasterdraw.fill_path(img, rect_path(0.0, 0.0, 1.0, 1.0), ink, GeomNonZero, geomxform.scaling(0.0, 4.0), opts(8, 8))),
+                       "the transform collapses the plane and cannot be inverted")
+    let tight = rasterdraw.RstDrawOpts { clip_rect: geomrect.of_xywh_i(0, 0, 8, 8), clip_mask: None, blend: RstOver,
+                                         paint_xform: id(), flatten: rasterfill.default_flatten(),
+                                         limits: RstLimits { max_pixels: 4, max_edges: 100 } }
+    test.assert_eq_str(fault_of(rasterdraw.fill_path(img, rect_path(0.0, 0.0, 8.0, 8.0), ink, GeomNonZero, id(), tight)),
+                       "a mask of 64 pixels is past the limit of 4")
+    test.assert_eq_str(fault_of(rasterdraw.fill_rect(img, geomrect.of_xywh(0.0, 0.0, 8.0, 8.0), ink, tight)),
+                       "a mask of 64 pixels is past the limit of 4")
+    test.case("the even-odd rule is passed on")
+    let nested = svgpath.of_commands(list.chain(svgpath.commands_of(rect_path(0.0, 0.0, 8.0, 8.0)),
+        svgpath.commands_of(rect_path(2.0, 2.0, 6.0, 6.0))))
+    test.assert(same(at(unwrap(rasterdraw.fill_path(img, nested, ink, GeomEvenOdd, id(), opts(8, 8))), 4, 4),
+        white()))
+    test.assert(same(at(unwrap(rasterdraw.fill_path(img, nested, ink, GeomNonZero, id(), opts(8, 8))), 4, 4),
+        black()))
+
+@test
+fn test_a_rectangle_is_the_same_as_the_path_of_it() [io]
+    let ink = rasterpaint.solid(srgb.rgb8(10, 120, 200))
+    for r in [geomrect.of_xywh(1.5, 1.5, 4.75, 3.25),
+    geomrect.of_xywh(0.0, 0.0, 8.0, 8.0),
+    geomrect.of_xywh(2.3, 2.3, 0.4, 0.4)]
+        let fast = unwrap(rasterdraw.fill_rect(canvas(8, 8), r, ink, opts(8, 8)))
+        let swept = unwrap(rasterdraw.fill_path(canvas(8, 8), svgpath.of_rect(r, 0.0, 0.0), ink, GeomNonZero, id(), opts(8, 8)))
+        var most = 0
+        for y in 0..8
+            for x in 0..8
+                most = math.max(most, math.abs_int(at(fast, x, y).rgb.r - at(swept, x, y).rgb.r))
+        test.assert(most <= 1)
+
+@test
+fn test_a_stroke_is_a_path_filled_non_zero() [io]
+    let ink = rasterpaint.solid(srgb.black())
+    let line = svgpath.of_points([geompoint.ptf(1.0, 4.0), geompoint.ptf(7.0, 4.0)], false)
+    let out = unwrap(rasterdraw.stroke_path(canvas(8, 8), line, ink, rasterstroke.solid(2.0), id(), opts(8, 8)))
+    test.assert(same(at(out, 1, 3), black()))
+    test.assert(same(at(out, 6, 4), black()))
+    test.assert(same(at(out, 0, 3), white()))
+    test.assert(same(at(out, 7, 3), white()))
+    test.assert(same(at(out, 3, 2), white()))
+    test.assert(same(at(out, 3, 5), white()))
+    test.case("the transform is applied after the offset, so a non-uniform scale makes it elliptical")
+    let up = svgpath.of_points([geompoint.ptf(2.0, 0.5), geompoint.ptf(2.0, 3.5)], false)
+    let wide = unwrap(rasterdraw.stroke_path(canvas(12, 4), up, ink, rasterstroke.solid(1.0), geomxform.scaling(3.0, 1.0), opts(12, 4)))
+    test.assert(same(at(wide, 4, 2), white()) == false)
+    test.assert(same(at(wide, 7, 2), white()) == false)
+    test.assert(same(at(wide, 3, 2), white()))
+    test.assert(same(at(wide, 8, 2), white()))
+    test.case("a dashed stroke is dashed")
+    let dashed = RstStrokeStyle { width: 2.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [2.0, 2.0],
+        dash_offset: 0.0 }
+    let d = unwrap(rasterdraw.stroke_path(canvas(8, 8), line, ink, dashed, id(), opts(8, 8)))
+    test.assert(same(at(d, 1, 3), black()))
+    test.assert(same(at(d, 3, 3), white()))
+    test.assert(same(at(d, 5, 3), black()))
+    test.case("a pattern that cannot advance is refused")
+    let bad = RstStrokeStyle { width: 2.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [0.0, 0.0],
+        dash_offset: 0.0 }
+    test.assert_eq_str(fault_of(rasterdraw.stroke_path(canvas(8, 8), line, ink, bad, id(), opts(8, 8))),
+                       "the dash pattern cannot advance: it is empty or has no positive length")
+    test.assert_eq_str(fault_of(rasterdraw.stroke_path(canvas(8, 8), line, ink, rasterstroke.solid(2.0), geomxform.scaling(0.0, 1.0), opts(8, 8))),
+                       "the transform collapses the plane and cannot be inverted")
+
+@test
+fn test_the_hairline_is_one_pixel_whatever_the_transform() [io]
+    let ink = rasterpaint.solid(srgb.black())
+    let up = svgpath.of_points([geompoint.ptf(0.5, 0.25), geompoint.ptf(0.5, 3.75)], false)
+    let out = unwrap(rasterdraw.stroke_path(canvas(8, 16), up, ink, rasterstroke.hairline(), geomxform.scaling(4.0, 4.0), opts(8, 16)))
+    test.assert(math.abs_int(at(out, 1, 8).rgb.r - 127) <= 1)
+    test.assert(math.abs_int(at(out, 2, 8).rgb.r - 127) <= 1)
+    test.assert(same(at(out, 0, 8), white()))
+    test.assert(same(at(out, 3, 8), white()))
+    test.case("a hairline through a transform that collapses the plane is refused")
+    test.assert_eq_str(fault_of(rasterdraw.stroke_path(canvas(8, 16), up, ink, rasterstroke.hairline(), geomxform.scaling(0.0, 4.0), opts(8, 16))),
+                       "the transform collapses the plane and cannot be inverted")
+
+@test
+fn test_clear_replaces_rather_than_blends() [io]
+    let img = canvas(4, 4)
+    let gone = unwrap(rasterdraw.clear(img, px(10, 20, 30, 0), opts(4, 4)))
+    test.assert(same(at(gone, 0, 0), px(10, 20, 30, 0)))
+    test.assert(same(at(gone, 3, 3), px(10, 20, 30, 0)))
+    test.assert(same(at(img, 0, 0), white()))
+    test.case("the blend mode is ignored")
+    test.assert(same(at(unwrap(rasterdraw.clear(img, px(1, 2, 3, 255), rasterdraw.with_blend(opts(4, 4), RstMultiply))),
+        2,
+        2),
+    px(1, 2, 3, 255)))
+    test.case("the clip rectangle limits it")
+    let part = unwrap(rasterdraw.clear(img, black(), rasterdraw.opts_at(geomrect.of_xywh_i(1, 1, 2, 2))))
+    test.assert(same(at(part, 1, 1), black()))
+    test.assert(same(at(part, 2, 2), black()))
+    test.assert(same(at(part, 0, 0), white()))
+    test.assert(same(at(part, 3, 3), white()))
+    test.case("a shaped clip clears part of the way")
+    let shaped = unwrap(rasterdraw.clear(img, px(10, 20, 30, 0), rasterdraw.with_clip(opts(4, 4), mask_from(2, 1, 0, 0, "ff80"))))
+    test.assert(same(at(shaped, 0, 0), px(10, 20, 30, 0)))
+    test.assert_eq(at(shaped, 1, 0).a, 127)
+    test.assert(same(at(shaped, 2, 0), white()))
+    test.case("a clear of a clip with nothing in the image does nothing")
+    test.assert(same(at(unwrap(rasterdraw.clear(img, black(), rasterdraw.opts_at(geomrect.of_xywh_i(10, 10, 2, 2)))),
+        0,
+        0),
+    white()))
+    test.case("the opaque kinds keep their alpha opaque")
+    test.assert(same(at(unwrap(rasterdraw.clear(image.new(2, 2, PixRgb8), px(5, 6, 7, 0), opts(2, 2))), 1, 1),
+        px(5, 6, 7, 255)))
+
+@test
+fn test_one_image_drawn_into_another() [io]
+    let src = image.filled(2, 2, PixRgba8, px(255, 0, 0, 255))
+    let dst = canvas(6, 6)
+    let out = unwrap(rasterdraw.draw_image(dst, src, 2, 3, opts(6, 6)))
+    test.assert(same(at(out, 2, 3), px(255, 0, 0, 255)))
+    test.assert(same(at(out, 3, 4), px(255, 0, 0, 255)))
+    test.assert(same(at(out, 1, 3), white()))
+    test.assert(same(at(out, 4, 4), white()))
+    test.assert(same(at(out, 2, 5), white()))
+    test.assert(same(at(dst, 2, 3), white()))
+    test.case("an image that hangs off the edge draws the part that fits")
+    let edge = unwrap(rasterdraw.draw_image(dst, src, -1, -1, opts(6, 6)))
+    test.assert(same(at(edge, 0, 0), px(255, 0, 0, 255)))
+    test.assert(same(at(edge, 1, 0), white()))
+    test.assert(same(at(unwrap(rasterdraw.draw_image(dst, src, 5, 5, opts(6, 6))), 5, 5), px(255, 0, 0, 255)))
+    test.case("one wholly outside leaves the image alone")
+    test.assert_eq_str(bytes.to_hex(unwrap(rasterdraw.draw_image(dst, src, 20, 20, opts(6, 6))).samples),
+        bytes.to_hex(dst.samples))
+    test.case("a translucent image is composited over")
+    let glass = image.filled(1, 1, PixRgba8, px(255, 0, 0, 128))
+    let over = unwrap(rasterdraw.draw_image(dst, glass, 0, 0, opts(6, 6)))
+    test.assert(same(at(over, 0, 0), rasterpaint.blend_over(px(255, 0, 0, 128), white())))
+    test.case("the blend mode and the clips apply")
+    let mult = unwrap(rasterdraw.draw_image(image.filled(2, 2, PixRgba8, px(0, 255, 255, 255)), src, 0, 0,
+                                            rasterdraw.with_blend(opts(2, 2), RstMultiply)))
+    test.assert(same(at(mult, 0, 0), black()))
+    let tile = unwrap(rasterdraw.draw_image(dst, src, 2, 3, rasterdraw.opts_at(geomrect.of_xywh_i(3, 0, 6, 6))))
+    test.assert(same(at(tile, 2, 3), white()))
+    test.assert(same(at(tile, 3, 3), px(255, 0, 0, 255)))
+    let shaped = unwrap(rasterdraw.draw_image(dst, src, 0, 0, rasterdraw.with_clip(opts(6, 6), mask_from(2, 1, 0, 0, "ff00"))))
+    test.assert(same(at(shaped, 0, 0), px(255, 0, 0, 255)))
+    test.assert(same(at(shaped, 1, 0), white()))
+    test.assert(same(at(shaped, 0, 1), white()))
+
+@test
+fn test_images_of_other_kinds_are_read_for_their_colour_and_alpha() [io]
+    let dst = canvas(2, 2)
+    let from_rgb = unwrap(rasterdraw.draw_image(dst, image.filled(1, 1, PixRgb8, px(1, 2, 3, 255)), 0, 0, opts(2, 2)))
+    test.assert(same(at(from_rgb, 0, 0), px(1, 2, 3, 255)))
+    let from_grey = unwrap(rasterdraw.draw_image(dst, image.filled(1, 1, PixLuma8, px(90, 90, 90, 255)), 1, 1, opts(2, 2)))
+    test.assert(same(at(from_grey, 1, 1), px(90, 90, 90, 255)))
+    let from_wide = unwrap(rasterdraw.draw_image(dst, image.filled(1, 1, PixRgba16, px(10, 20, 30, 255)), 0, 1, opts(2, 2)))
+    test.assert(same(at(from_wide, 0, 1), px(10, 20, 30, 255)))
+    let from_ga = unwrap(rasterdraw.draw_image(dst, image.filled(1, 1, PixLumaAlpha8, px(0, 0, 0, 0)), 1, 0, opts(2, 2)))
+    test.assert(same(at(from_ga, 1, 0), white()))
+
+@test
+fn test_a_mask_and_an_image_convert_both_ways_with_no_codec() [io]
+    let m = mask_from(3, 2, 7, 9, "00408000ff10")
+    let img = rasterdraw.mask_to_image(m)
+    test.assert(img.kind == PixLuma8)
+    test.assert_eq(img.width, 3)
+    test.assert_eq(img.height, 2)
+    test.assert_eq_str(bytes.to_hex(img.samples), "00408000ff10")
+    test.case("an image's alpha is its coverage, wherever the caller puts the origin")
+    let rgba = image.from_samples(2,
+        2,
+        PixRgba8,
+        bytes.from_hex("ff000000" + "00ff0040" + "0000ff80" + "ffffffff") ?? bytes.zeros(16)) ?? image.new(1, 1, PixRgba8)
+    match rasterdraw.image_to_mask(rgba, 5, -2, rastermask.default_limits())
+        Ok(a)  =>
+            test.assert_eq_str(bytes.to_hex(a.coverage), "004080ff")
+            test.assert_eq(a.origin_x, 5)
+            test.assert_eq(a.origin_y, -2)
+        Err(_) => test.fail("an image was refused")
+    test.case("alpha of a grey image, and of a wide one")
+    match rasterdraw.image_to_mask(image.filled(2, 1, PixLumaAlpha8, px(5, 5, 5, 99)), 0, 0, rastermask.default_limits())
+        Ok(a)  => test.assert_eq_str(bytes.to_hex(a.coverage), "6363")
+        Err(_) => test.fail("an image was refused")
+    match rasterdraw.image_to_mask(image.filled(1, 1, PixRgba16, px(5, 5, 5, 200)), 0, 0, rastermask.default_limits())
+        Ok(a)  => test.assert_eq_str(bytes.to_hex(a.coverage), "c8")
+        Err(_) => test.fail("an image was refused")
+    test.case("an image without alpha covers everything")
+    match rasterdraw.image_to_mask(image.filled(2, 2, PixRgb8, px(5, 5, 5, 0)), 0, 0, rastermask.default_limits())
+        Ok(a)  => test.assert(rastermask.is_opaque(a))
+        Err(_) => test.fail("an image was refused")
+    test.case("the budget applies")
+    match rasterdraw.image_to_mask(rgba, 0, 0, RstLimits { max_pixels: 3, max_edges: 10 })
+        Ok(_)  => test.fail("an image past the budget was accepted")
+        Err(e) => test.assert_eq_str(rastererror.describe(e), "a mask of 4 pixels is past the limit of 3")
+    test.case("a photograph's alpha clips a draw")
+    match rasterdraw.image_to_mask(rgba, 0, 0, rastermask.default_limits())
+        Ok(clip) =>
+            let out = unwrap(rasterdraw.fill_rect(canvas(2, 2), geomrect.of_xywh(0.0, 0.0, 2.0, 2.0), rasterpaint.solid(srgb.black()),
+                                                  rasterdraw.with_clip(opts(2, 2), clip)))
+            test.assert(same(at(out, 0, 0), white()))
+            test.assert(same(at(out, 1, 1), black()))
+        Err(_)   => test.fail("an image was refused")

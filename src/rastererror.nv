@@ -73,14 +73,14 @@ pub enum RstFault
 // ```
 pub fn describe(f: RstFault) -> Str []
     match f
-        RstTooLarge(want, limit)                  =>
+        RstTooLarge(want, limit)              =>
             "a mask of ${want} pixels is past the limit of ${limit}"
-        RstSingularTransform                      => "the transform collapses the plane and cannot be inverted"
-        RstExtentMismatch(a_w, a_h, b_w, b_h)     =>
+        RstSingularTransform                  => "the transform collapses the plane and cannot be inverted"
+        RstExtentMismatch(a_w, a_h, b_w, b_h) =>
             "two masks cover different rectangles: ${a_w} by ${a_h} and ${b_w} by ${b_h}"
-        RstDegenerateGradient                     => "the gradient has no direction: its points coincide or its radius is not positive"
-        RstBadDash                                => "the dash pattern cannot advance: it is empty or has no positive length"
-        RstPixelKind(kind)                        => "the pixel kind ${kind} cannot be drawn into"
+        RstDegenerateGradient                 => "the gradient has no direction: its points coincide or its radius is not positive"
+        RstBadDash                            => "the dash pattern cannot advance: it is empty or has no positive length"
+        RstPixelKind(kind)                    => "the pixel kind ${kind} cannot be drawn into"
 
 // Whether the refusal is about a size the caller chose.
 //

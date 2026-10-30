@@ -1,0 +1,497 @@
+// rasterstroke_tests.nv - a stroke is a path, and dashing is a path.
+//
+// Pixel planes are checked against cairo (tests/oracle/vectors.py prints
+// the vectors; an axis-aligned stroke agrees with cairo exactly, a slanted
+// edge to within the 17 levels its fifteen sub-scanlines quantise to).  The
+// geometry is checked against values worked out by hand: bounds, areas, and
+// the point a miter reaches.
+
+use std.test
+use std.bytes
+use std.list
+use geompoint
+use geomrect
+use geomxform
+use svgpath
+use rastermask
+use rasterfill
+use rasterstroke
+use rastererror
+
+fn id() -> geomxform.GeomXform
+    geomxform.identity()
+
+fn grid(w: Int, h: Int) -> geomrect.GeomRectI
+    geomrect.of_xywh_i(0, 0, w, h)
+
+fn fine() -> RstFlatten
+    RstFlatten { tolerance: 0.01, max_per_curve: 4096 }
+
+fn polyline(ps: [GeomPointF]) -> svgpath.SvgPath
+    svgpath.of_points(ps, false)
+
+fn p2(x: Float, y: Float) -> GeomPointF
+    geompoint.ptf(x, y)
+
+fn style(width: Float, join: RstJoin, cap: RstCap) -> RstStrokeStyle
+    RstStrokeStyle { width: width,
+        join: join,
+        cap: cap,
+        miter_limit: 4.0,
+        dash: [],
+        dash_offset: 0.0 }
+
+fn ink(path: svgpath.SvgPath, s: RstStrokeStyle) -> svgpath.SvgPath
+    match rasterstroke.outline(path, s)
+        Ok(p)  => p
+        Err(_) => svgpath.empty()
+
+// The stroke filled non-zero over a w by h grid.
+fn plane(path: svgpath.SvgPath, s: RstStrokeStyle, w: Int, h: Int) -> rastermask.RstMask
+    match rasterfill.fill(ink(path, s), id(), grid(w, h), rasterstroke.fill_rule(), fine(), rastermask.default_limits())
+        Ok(m)  => m
+        Err(_) => RstMask { width: 1, height: 1, origin_x: 0, origin_y: 0, coverage: bytes.zeros(1) }
+
+// The area the stroke covers, in pixels.
+fn area(path: svgpath.SvgPath, s: RstStrokeStyle, w: Int, h: Int) -> Float
+    let m = plane(path, s, w, h)
+    var total = 0
+    for i in 0..bytes.len(m.coverage)
+        total = total + (bytes.byte_at(m.coverage, i) ?? 0)
+    total as Float / 255.0
+
+fn worst(m: rastermask.RstMask, w: Int, h: Int, want: Str) -> Int
+    let b = bytes.from_hex(want) ?? bytes.zeros(0)
+    var most = 0
+    for y in 0..h
+        for x in 0..w
+            most = math.max(most, math.abs_int(rastermask.at(m, x, y) - (bytes.byte_at(b, y * w + x) ?? 0)))
+    most
+
+fn corner() -> svgpath.SvgPath
+    polyline([p2(3.0, 13.0), p2(3.0, 4.0), p2(12.0, 4.0)])
+
+fn bounds_of(path: svgpath.SvgPath, s: RstStrokeStyle) -> geomrect.GeomRectF
+    svgpath.bounds(ink(path, s))
+
+fn dashes(path: svgpath.SvgPath, pattern: [Float], offset: Float) -> svgpath.SvgPath
+    match rasterstroke.dash(path, pattern, offset)
+        Ok(p)  => p
+        Err(_) => svgpath.empty()
+
+fn want_miter_corner() -> Str
+    "0000000000000000000000000000000000000000000000000000000000000000004080808080808080808080000000000080ffffffffffffffffffff000000000080ffffffffffffffffffff000000000080ffffc080808080808080000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_bevel_corner() -> Str
+    "000000000000000000000000000000000000000000000000000000000000000000002077777777777777777700000000001eddffffffffffffffffff000000000080ffffffffffffffffffff000000000080ffffc488888888888888000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff8000000000000000000000000080ffff800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_closed_square() -> Str
+    "00000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffff0000000000ffffffffffffffffffffff0000000000ffff00000000000000ffff0000000000ffff00000000000000ffff0000000000ffff00000000000000ffff0000000000ffff00000000000000ffff0000000000ffff00000000000000ffff0000000000ffff00000000000000ffff0000000000ffff00000000000000ffff0000000000ffffffffffffffffffffff0000000000ffffffffffffffffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_dashed() -> Str
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffff000000ffffffff000000ffffffff000000ffffff000000ffffffff000000ffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_square_caps() -> Str
+    "000000000000000000000000000000000000000000000000000000000000000000000080808080808080808080000000000000ffffffffffffffffffff000000000000ffffffffffffffffffff000000000000808080808080808080800000000000000000000000000000000000000000000000000000000000000000000000"
+
+fn want_slanted() -> Str
+    "000000000000000000000000000000000000000000000000000000000000000000009164000000000000000000000000006affff990500000000000000000000003ae7ffffc21500000000000000000000001bcaffffdc2c000000000000000000000008a2fffff35100000000000000000000000177fdfffe880100000000000000000000004af0ffffaa0a000000000000000000000026d8ffffd020000000000000000000000012bbffffeb4000000000000000000000000388ffff68000000000000000000000000006490000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+@test
+fn test_the_styles_and_the_fill_rule() [io]
+    let s = rasterstroke.solid(3.0)
+    test.assert_approx(s.width, 3.0, 0.0000001)
+    test.assert(s.join == RstRound)
+    test.assert(s.cap == RstButt)
+    test.assert_approx(s.miter_limit, 4.0, 0.0000001)
+    test.assert(list.is_empty(s.dash))
+    test.assert_approx(s.dash_offset, 0.0, 0.0000001)
+    test.assert(rasterstroke.is_hairline(s) == false)
+    test.assert(rasterstroke.is_hairline(rasterstroke.solid(0.0)) == false)
+    test.assert(rasterstroke.is_hairline(rasterstroke.hairline()))
+    test.assert(rasterstroke.fill_rule() == GeomNonZero)
+
+@test
+fn test_a_butt_line_is_a_rectangle() [io]
+    let line = polyline([p2(2.0, 8.0), p2(30.0, 8.0)])
+    let b = bounds_of(line, style(4.0, RstRound, RstButt))
+    test.assert_approx(b.min.x, 2.0, 0.0001)
+    test.assert_approx(b.max.x, 30.0, 0.0001)
+    test.assert_approx(b.min.y, 6.0, 0.0001)
+    test.assert_approx(b.max.y, 10.0, 0.0001)
+    test.assert_approx(area(line, style(4.0, RstRound, RstButt), 32, 16), 112.0, 0.01)
+    test.assert_eq(svgpath.subpath_count(ink(line, style(4.0, RstRound, RstButt))), 1)
+
+@test
+fn test_the_caps() [io]
+    let line = polyline([p2(10.0, 10.0), p2(30.0, 10.0)])
+    test.case("a round cap is a half disc past the end")
+    let r = bounds_of(line, style(6.0, RstRound, RstRoundCap))
+    test.assert_approx(r.min.x, 7.0, 0.01)
+    test.assert_approx(r.max.x, 33.0, 0.01)
+    test.assert_approx(area(line, style(6.0, RstRound, RstRoundCap), 40, 20), 20.0 * 6.0 + math.pi() * 9.0, 0.5)
+    test.case("a square cap is a half square")
+    let q = bounds_of(line, style(6.0, RstRound, RstSquare))
+    test.assert_approx(q.min.x, 7.0, 0.0001)
+    test.assert_approx(q.max.x, 33.0, 0.0001)
+    test.assert_approx(area(line, style(6.0, RstRound, RstSquare), 40, 20), 26.0 * 6.0, 0.05)
+    test.case("a butt cap stops at the end")
+    test.assert_approx(area(line, style(6.0, RstRound, RstButt), 40, 20), 20.0 * 6.0, 0.05)
+    test.case("the cap follows the direction of the line")
+    let up = polyline([p2(10.0, 30.0), p2(10.0, 10.0)])
+    let u = bounds_of(up, style(6.0, RstRound, RstSquare))
+    test.assert_approx(u.min.y, 7.0, 0.0001)
+    test.assert_approx(u.max.y, 33.0, 0.0001)
+
+@test
+fn test_the_joins_at_a_right_angle() [io]
+    test.case("a miter reaches the corner of the square the offsets make")
+    let m = bounds_of(corner(), style(3.0, RstMiter, RstButt))
+    test.assert_approx(m.min.x, 1.5, 0.0001)
+    test.assert_approx(m.min.y, 2.5, 0.0001)
+    test.assert_approx(m.max.x, 12.0, 0.0001)
+    test.assert_approx(m.max.y, 13.0, 0.0001)
+    test.assert_approx(area(corner(), style(3.0, RstMiter, RstButt), 16, 16), 54.0, 0.15)
+    test.case("a bevel cuts the corner off, and a round join is between")
+    let bevel = area(corner(), style(3.0, RstBevel, RstButt), 16, 16)
+    let round = area(corner(), style(3.0, RstRound, RstButt), 16, 16)
+    let miter = area(corner(), style(3.0, RstMiter, RstButt), 16, 16)
+    test.assert_approx(miter - bevel, 1.125, 0.1)
+    test.assert(round > bevel)
+    test.assert(round < miter)
+    test.assert_approx(round - bevel, 2.25 * (math.pi() / 4.0 - 0.5), 0.1)
+
+@test
+fn test_strokes_agree_with_cairo() [io]
+    let s_miter = style(3.0, RstMiter, RstButt)
+    test.assert(worst(plane(corner(), s_miter, 16, 16), 16, 16, want_miter_corner()) <= 1)
+    test.assert(worst(plane(corner(), style(3.0, RstBevel, RstButt), 16, 16), 16, 16, want_bevel_corner()) <= 20)
+    test.case("a closed square has a hole and four mitred corners")
+    let sq = svgpath.of_points([p2(3.0, 3.0), p2(12.0, 3.0), p2(12.0, 12.0), p2(3.0, 12.0)], true)
+    let ring = plane(sq, style(2.0, RstMiter, RstButt), 16, 16)
+    test.assert(worst(ring, 16, 16, want_closed_square()) <= 1)
+    test.assert_eq(rastermask.at(ring, 7, 7), 0)
+    test.case("square caps")
+    test.assert(worst(plane(polyline([p2(4.5, 4.0), p2(11.5, 4.0)]), style(3.0, RstMiter, RstSquare), 16, 8), 16, 8,
+                      want_square_caps()) <= 1)
+    test.case("a slanted line is within the quantisation of cairo's scan converter")
+    test.assert(worst(plane(polyline([p2(2.0, 3.0), p2(13.0, 12.0)]), style(2.5, RstMiter, RstButt), 16, 16), 16, 16,
+                      want_slanted()) <= 20)
+    test.case("a dashed line")
+    let dashed = RstStrokeStyle { width: 2.0,
+        join: RstMiter,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [4.0, 3.0],
+        dash_offset: 1.0 }
+    test.assert(worst(plane(polyline([p2(1.0, 3.0), p2(19.0, 3.0)]), dashed, 20, 6), 20, 6, want_dashed()) <= 1)
+
+@test
+fn test_the_miter_limit_turns_a_spike_into_a_bevel() [io]
+    let sharp = polyline([p2(3.0, 26.0), p2(34.0, 15.0), p2(3.0, 6.0)])
+    let limited = RstStrokeStyle { width: 3.0,
+        join: RstMiter,
+        cap: RstButt,
+        miter_limit: 2.0,
+        dash: [],
+        dash_offset: 0.0 }
+    let unlimited = RstStrokeStyle { width: 3.0,
+        join: RstMiter,
+        cap: RstButt,
+        miter_limit: 10.0,
+        dash: [],
+        dash_offset: 0.0 }
+    let bevel = RstStrokeStyle { width: 3.0,
+        join: RstBevel,
+        cap: RstButt,
+        miter_limit: 2.0,
+        dash: [],
+        dash_offset: 0.0 }
+    test.case("beyond the limit the miter is the bevel")
+    test.assert_approx(area(sharp, limited, 40, 32), area(sharp, bevel, 40, 32), 0.001)
+    test.assert(bounds_of(sharp, unlimited).max.x > bounds_of(sharp, limited).max.x + 1.0)
+    test.case("a miter below the limit is the same as ever")
+    let wide = polyline([p2(3.0, 18.0), p2(20.0, 8.0), p2(37.0, 18.0)])
+    test.assert(area(wide, unlimited, 40, 24) > area(wide, bevel, 40, 24))
+    test.assert_approx(area(wide, limited, 40, 24), area(wide, unlimited, 40, 24), 0.001)
+
+@test
+fn test_a_turn_back_on_itself_is_capped_by_the_join() [io]
+    let there_and_back = polyline([p2(5.0, 10.0), p2(25.0, 10.0), p2(5.0, 10.0)])
+    test.case("a round join is a half disc past the turn")
+    let r = bounds_of(there_and_back, style(6.0, RstRound, RstButt))
+    test.assert_approx(r.max.x, 28.0, 0.05)
+    test.case("a bevel and a miter go no further than the turn")
+    test.assert_approx(bounds_of(there_and_back, style(6.0, RstBevel, RstButt)).max.x, 25.0, 0.0001)
+    test.assert_approx(bounds_of(there_and_back, style(6.0, RstMiter, RstButt)).max.x, 25.0, 0.0001)
+
+@test
+fn test_a_straight_run_of_points_is_one_straight_stroke() [io]
+    let split = polyline([p2(2.0, 5.0), p2(8.0, 5.0), p2(14.0, 5.0), p2(20.0, 5.0)])
+    let whole = polyline([p2(2.0, 5.0), p2(20.0, 5.0)])
+    test.assert_approx(area(split, style(2.0, RstRound, RstButt), 24, 10),
+        area(whole, style(2.0, RstRound, RstButt), 24, 10),
+        0.001)
+    test.case("repeated points are one point")
+    let dupes = polyline([p2(2.0, 5.0), p2(2.0, 5.0), p2(20.0, 5.0), p2(20.0, 5.0)])
+    test.assert_approx(area(dupes, style(2.0, RstRound, RstButt), 24, 10), 36.0, 0.001)
+
+@test
+fn test_a_short_segment_inside_a_sharp_turn_leaves_no_hole() [io]
+    test.case("the offset lines cannot meet inside a segment shorter than the turn needs")
+    let zig = polyline([p2(2.0, 2.0), p2(18.0, 3.0), p2(18.5, 3.2), p2(2.0, 5.0)])
+    let m = plane(zig, style(5.0, RstRound, RstButt), 24, 12)
+    test.assert_eq(rastermask.at(m, 10, 3), 255)
+    test.assert_eq(rastermask.at(m, 17, 3), 255)
+    test.assert_eq(rastermask.at(m, 3, 4), 255)
+
+@test
+fn test_a_closed_path_is_a_ring() [io]
+    let tri = svgpath.of_points([p2(4.0, 20.0), p2(12.0, 4.0), p2(20.0, 20.0)], true)
+    let m = plane(tri, style(2.0, RstRound, RstButt), 24, 24)
+    test.assert_eq(rastermask.at(m, 12, 16), 0)
+    test.assert_eq(rastermask.at(m, 12, 20), 255)
+    test.case("two points closed are a line with a join at each end")
+    let flat = svgpath.of_points([p2(4.0, 6.0), p2(20.0, 6.0)], true)
+    test.assert_approx(area(flat, style(4.0, RstRound, RstButt), 24, 12), 16.0 * 4.0 + math.pi() * 4.0, 0.3)
+
+@test
+fn test_a_subpath_of_one_point_is_a_dot_or_nothing() [io]
+    let at = svgpath.line_to(svgpath.move_to(svgpath.empty(), 10.0, 10.0), 10.0, 10.0)
+    test.assert_approx(area(at, style(6.0, RstRound, RstRoundCap), 20, 20), math.pi() * 9.0, 0.5)
+    test.assert_approx(area(at, style(6.0, RstRound, RstSquare), 20, 20), 36.0, 0.001)
+    test.assert_eq(svgpath.command_count(ink(at, style(6.0, RstRound, RstButt))), 0)
+    test.case("a closed subpath of one point is the same")
+    let closed = svgpath.close(svgpath.move_to(svgpath.empty(), 10.0, 10.0))
+    test.assert_approx(area(closed, style(6.0, RstRound, RstRoundCap), 20, 20), math.pi() * 9.0, 0.5)
+    test.case("a move alone draws nothing")
+    test.assert_eq(svgpath.command_count(ink(svgpath.move_to(svgpath.empty(), 10.0, 10.0), style(6.0, RstRound, RstRoundCap))),
+        0)
+
+@test
+fn test_a_width_of_zero_draws_nothing_and_the_hairline_is_one_unit() [io]
+    let line = polyline([p2(2.0, 8.0), p2(30.0, 8.0)])
+    test.assert_eq(svgpath.command_count(ink(line, rasterstroke.solid(0.0))), 0)
+    test.assert_approx(bounds_of(line, rasterstroke.hairline()).max.y - bounds_of(line, rasterstroke.hairline()).min.y,
+        1.0,
+        0.0001)
+    test.assert_approx(area(line, rasterstroke.hairline(), 32, 16), 28.0, 0.15)
+
+@test
+fn test_curves_are_stroked_by_their_flattening() [io]
+    let arc = svgpath.cubic_to(svgpath.move_to(svgpath.empty(), 4.0, 26.0), 10.0, -6.0, 28.0, 40.0, 36.0, 6.0)
+    let s = style(3.0, RstRound, RstButt)
+    let length = svgpath.length(arc, 0.01)
+    test.assert_approx(area(arc, s, 40, 32), length * 3.0, length * 3.0 * 0.03)
+    let quad = svgpath.quad_to(svgpath.move_to(svgpath.empty(), 2.0, 20.0), 12.0, -4.0, 22.0, 20.0)
+    test.assert(area(quad, s, 24, 24) > 30.0)
+
+@test
+fn test_dashing_cuts_the_path_into_its_on_segments() [io]
+    let line = polyline([p2(0.0, 0.0), p2(20.0, 0.0)])
+    test.case("four on, two off")
+    let d = dashes(line, [4.0, 2.0], 0.0)
+    test.assert_eq(svgpath.subpath_count(d), 4)
+    let b = svgpath.bounds(d)
+    test.assert_approx(b.min.x, 0.0, 0.0001)
+    test.assert_approx(b.max.x, 20.0, 0.0001)
+    test.assert_approx(svgpath.length(d, 0.1), 14.0, 0.0001)
+    test.case("an offset moves the pattern along")
+    let o = dashes(line, [4.0, 2.0], 1.0)
+    test.assert_approx(svgpath.length(o, 0.1), 14.0, 0.0001)
+    test.assert_approx(svgpath.bounds(o).min.x, 0.0, 0.0001)
+    test.case("an offset into the gap starts with a gap")
+    test.assert_approx(svgpath.bounds(dashes(line, [4.0, 2.0], 5.0)).min.x, 1.0, 0.0001)
+    test.case("a negative offset is the same as the one a cycle on")
+    test.assert_approx(svgpath.length(dashes(line, [4.0, 2.0], -1.0), 0.1),
+        svgpath.length(dashes(line, [4.0, 2.0], 5.0), 0.1),
+        0.0001)
+    test.case("an odd pattern is repeated, as SVG says")
+    test.assert_approx(svgpath.length(dashes(line, [3.0], 0.0), 0.1),
+        svgpath.length(dashes(line, [3.0, 3.0], 0.0), 0.1),
+        0.0001)
+    test.assert_approx(svgpath.length(dashes(line, [6.0, 2.0, 1.0], 0.0), 0.1), 11.0, 0.0001)
+    test.case("a dash that runs past a corner turns it")
+    let bent = polyline([p2(0.0, 0.0), p2(10.0, 0.0), p2(10.0, 10.0)])
+    let bd = dashes(bent, [15.0, 100.0], 0.0)
+    test.assert_eq(svgpath.subpath_count(bd), 1)
+    test.assert_eq(svgpath.command_count(bd), 3)
+    test.case("each subpath starts the pattern again")
+    let two = svgpath.line_to(svgpath.move_to(line, 0.0, 5.0), 20.0, 5.0)
+    test.assert_eq(svgpath.subpath_count(dashes(two, [4.0, 2.0], 0.0)), 8)
+
+@test
+fn test_dashing_a_closed_path_and_a_curve() [io]
+    let sq = svgpath.of_points([p2(0.0, 0.0), p2(10.0, 0.0), p2(10.0, 10.0), p2(0.0, 10.0)], true)
+    test.assert_approx(svgpath.length(dashes(sq, [5.0, 5.0], 0.0), 0.1), 20.0, 0.0001)
+    let arc = svgpath.quad_to(svgpath.move_to(svgpath.empty(), 0.0, 0.0), 10.0, 10.0, 20.0, 0.0)
+    test.assert_approx(svgpath.length(dashes(arc, [1.0, 1.0], 0.0), 0.01), svgpath.length(arc, 0.01) / 2.0, 0.6)
+
+@test
+fn test_a_dash_of_no_length_is_a_dot_under_a_round_cap() [io]
+    let line = polyline([p2(2.0, 5.0), p2(21.0, 5.0)])
+    let dots = RstStrokeStyle { width: 3.0,
+        join: RstRound,
+        cap: RstRoundCap,
+        miter_limit: 4.0,
+        dash: [0.0, 6.0],
+        dash_offset: 0.0 }
+    test.assert_eq(svgpath.subpath_count(dashes(line, [0.0, 6.0], 0.0)), 4)
+    test.assert_approx(area(line, dots, 24, 10), 4.0 * math.pi() * 2.25, 0.8)
+    test.case("and nothing under a butt cap")
+    let butt = RstStrokeStyle { width: 3.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [0.0, 6.0],
+        dash_offset: 0.0 }
+    test.assert_approx(area(line, butt, 24, 10), 0.0, 0.0001)
+
+@test
+fn test_a_dash_pattern_that_cannot_advance_is_refused() [io]
+    test.assert(rasterstroke.dash_is_usable([]) == false)
+    test.assert(rasterstroke.dash_is_usable([0.0, 0.0]) == false)
+    test.assert(rasterstroke.dash_is_usable([-1.0, 2.0]) == false)
+    test.assert(rasterstroke.dash_is_usable([math.nan(), 2.0]) == false)
+    test.assert(rasterstroke.dash_is_usable([math.infinity()]) == false)
+    test.assert(rasterstroke.dash_is_usable([4.0, 2.0]))
+    test.assert(rasterstroke.dash_is_usable([0.0, 2.0]))
+    test.assert(rasterstroke.dash_is_usable([3.0]))
+    let line = polyline([p2(0.0, 0.0), p2(20.0, 0.0)])
+    match rasterstroke.dash(line, [], 0.0)
+        Ok(_)  => test.fail("an empty pattern was accepted")
+        Err(e) => test.assert_eq_str(rastererror.describe(e),
+            "the dash pattern cannot advance: it is empty or has no positive length")
+    test.case("the style's own dash is checked by the outline")
+    let bad = RstStrokeStyle { width: 2.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [0.0],
+        dash_offset: 0.0 }
+    match rasterstroke.outline(line, bad)
+        Ok(_)  => test.fail("an unusable dash was stroked")
+        Err(e) => test.assert(rastererror.is_budget(e) == false)
+    test.case("a pattern that would cut the path into more pieces than can be held is refused")
+    match rasterstroke.dash(line, [0.00000001, 0.00000001], 0.0)
+        Ok(_)  => test.fail("twenty billion dashes were cut")
+        Err(_) => ()
+
+@test
+fn test_the_outline_applies_the_styles_dash() [io]
+    let line = polyline([p2(0.0, 5.0), p2(20.0, 5.0)])
+    let dashed = RstStrokeStyle { width: 2.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [4.0, 2.0],
+        dash_offset: 0.0 }
+    test.assert_eq(svgpath.subpath_count(ink(line, dashed)), 4)
+    test.assert_approx(area(line, dashed, 24, 10), 28.0, 0.05)
+    test.case("it is the same as dashing and then stroking")
+    let chained = ink(dashes(line, [4.0, 2.0], 0.0), style(2.0, RstRound, RstButt))
+    test.assert_eq(svgpath.command_count(chained), svgpath.command_count(ink(line, dashed)))
+
+@test
+fn test_the_bounds_of_a_stroke_without_building_it() [io]
+    test.case("half the width past a butt end and a round join")
+    let line = polyline([p2(2.0, 8.0), p2(30.0, 8.0)])
+    let b = rasterstroke.stroked_bounds(line, style(4.0, RstRound, RstButt))
+    test.assert_approx(b.min.x, 0.0, 0.0001)
+    test.assert_approx(b.max.x, 32.0, 0.0001)
+    test.assert_approx(b.min.y, 6.0, 0.0001)
+    test.case("a miter reaches further at a sharp corner than half the width")
+    let sharp = polyline([p2(0.0, 0.0), p2(20.0, 0.0), p2(0.0, 1.0)])
+    let m = RstStrokeStyle { width: 4.0,
+        join: RstMiter,
+        cap: RstButt,
+        miter_limit: 100.0,
+        dash: [],
+        dash_offset: 0.0 }
+    test.assert(geomrect.width(rasterstroke.stroked_bounds(sharp, m)) > geomrect.width(svgpath.bounds(sharp)) + 4.0)
+    test.assert(rasterstroke.stroked_bounds(sharp, m).max.x >= bounds_of(sharp, m).max.x)
+    test.case("a miter past the limit is a bevel and reaches no further than a round join")
+    let capped = RstStrokeStyle { width: 4.0,
+        join: RstMiter,
+        cap: RstButt,
+        miter_limit: 2.0,
+        dash: [],
+        dash_offset: 0.0 }
+    test.assert_approx(rasterstroke.stroked_bounds(sharp, capped).max.x, 22.0, 0.0001)
+    test.case("a square cap reaches the corner of its square")
+    let sq = rasterstroke.stroked_bounds(line, style(4.0, RstRound, RstSquare))
+    test.assert(sq.max.x >= 32.0 - 0.0001)
+    test.assert(sq.max.x <= 30.0 + 2.0 * 1.4143)
+    test.case("a closed path counts its closing corner")
+    let box = svgpath.of_points([p2(0.0, 0.0), p2(10.0, 0.0), p2(10.0, 10.0), p2(0.0, 10.0)], true)
+    let sm = RstStrokeStyle { width: 2.0,
+        join: RstMiter,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [],
+        dash_offset: 0.0 }
+    test.assert_approx(rasterstroke.stroked_bounds(box, sm).max.x, 10.0 + 1.0 * 1.41421356, 0.001)
+    test.case("a width of zero, an empty path and the hairline")
+    test.assert(geomrect.is_empty(rasterstroke.stroked_bounds(line, rasterstroke.solid(0.0))))
+    test.assert(geomrect.is_empty(rasterstroke.stroked_bounds(svgpath.empty(), rasterstroke.solid(2.0))))
+    test.assert_approx(geomrect.height(rasterstroke.stroked_bounds(line, rasterstroke.hairline())), 1.0, 0.0001)
+    test.case("a single point has the dot's bounds")
+    test.assert_approx(geomrect.width(rasterstroke.stroked_bounds(svgpath.close(svgpath.move_to(svgpath.empty(), 5.0, 5.0)),
+                                                                 style(4.0, RstRound, RstRoundCap))),
+                                                                 4.0, 0.0001)
+
+@test
+fn test_the_miter_arithmetic() [io]
+    test.assert_approx(rasterstroke.miter_extent(math.pi()), 1.0, 0.0000001)
+    test.assert_approx(rasterstroke.miter_extent(math.pi() / 2.0), math.sqrt(2.0), 0.0000001)
+    test.assert_approx(rasterstroke.miter_extent(math.pi() / 3.0), 2.0, 0.0000001)
+    test.assert_approx(rasterstroke.miter_extent(math.pi() / 6.0), 1.0 / math.sin(math.pi() / 12.0), 0.0000001)
+    test.assert(math.is_inf(rasterstroke.miter_extent(0.0)))
+    test.assert(math.is_inf(rasterstroke.miter_extent(-1.0)))
+    test.assert_approx(rasterstroke.miter_extent(4.0), 1.0, 0.0000001)
+    test.case("an angle of sixty degrees is a miter of exactly two half widths")
+    test.assert(rasterstroke.miter_becomes_bevel(math.pi() / 3.0, 1.99))
+    test.assert(rasterstroke.miter_becomes_bevel(math.pi() / 3.0, 2.01) == false)
+    test.assert(rasterstroke.miter_becomes_bevel(0.05, 4.0))
+    test.assert(rasterstroke.miter_becomes_bevel(1.5, 4.0) == false)
+
+@test
+fn test_hit_testing_a_line() [io]
+    let line = polyline([p2(2.0, 8.0), p2(30.0, 8.0)])
+    let s = style(4.0, RstRound, RstButt)
+    test.assert(rasterstroke.stroke_contains(line, s, 10.0, 8.0))
+    test.assert(rasterstroke.stroke_contains(line, s, 10.0, 9.9))
+    test.assert(rasterstroke.stroke_contains(line, s, 10.0, 10.1) == false)
+    test.assert(rasterstroke.stroke_contains(line, s, 10.0, 40.0) == false)
+    test.case("past the end a butt cap stops and a round one goes on")
+    test.assert(rasterstroke.stroke_contains(line, s, 31.0, 8.0) == false)
+    test.assert(rasterstroke.stroke_contains(line, style(4.0, RstRound, RstRoundCap), 31.0, 8.0))
+    test.assert(rasterstroke.stroke_contains(line, style(4.0, RstRound, RstSquare), 31.9, 9.9))
+    test.case("a dash has gaps")
+    let dashed = RstStrokeStyle { width: 4.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [4.0, 4.0],
+        dash_offset: 0.0 }
+    test.assert(rasterstroke.stroke_contains(line, dashed, 4.0, 8.0))
+    test.assert(rasterstroke.stroke_contains(line, dashed, 8.0, 8.0) == false)
+    test.case("a dash that cannot advance contains nothing")
+    let bad = RstStrokeStyle { width: 4.0,
+        join: RstRound,
+        cap: RstButt,
+        miter_limit: 4.0,
+        dash: [0.0],
+        dash_offset: 0.0 }
+    test.assert(rasterstroke.stroke_contains(line, bad, 10.0, 8.0) == false)
+    test.case("a corner is inside by its join")
+    test.assert(rasterstroke.stroke_contains(corner(), style(3.0, RstMiter, RstButt), 1.6, 2.6))
+    test.assert(rasterstroke.stroke_contains(corner(), style(3.0, RstBevel, RstButt), 1.6, 2.6) == false)
+
+@test
+fn test_a_closed_path_that_returns_to_its_start_is_the_same_ring() [io]
+    let implicit = svgpath.of_points([p2(4.0, 20.0), p2(12.0, 4.0), p2(20.0, 20.0)], true)
+    let explicit = svgpath.of_points([p2(4.0, 20.0), p2(12.0, 4.0), p2(20.0, 20.0), p2(4.0, 20.0)], true)
+    test.assert_approx(area(explicit, style(2.0, RstMiter, RstButt), 24, 24),
+        area(implicit, style(2.0, RstMiter, RstButt), 24, 24),
+        0.001)

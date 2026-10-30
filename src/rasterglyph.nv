@@ -174,7 +174,8 @@ pub fn rasterize(outline: svgpath.SvgPath, scale: geomxform.GeomXform, pen_x: Fl
     let room = geomrect.of_xywh_i(0 - room_edge(), 0 - room_edge(), 2 * room_edge(), 2 * room_edge())
     let box = rasterfill.pixel_bounds(outline, placed, room)
     let mask = match rasterfill.fill(outline, placed, box, GeomNonZero, flatten, limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(m)  => m
     Ok(RstGlyphImage { mask: mask, bearing_x: mask.origin_x, bearing_y: 0 - mask.origin_y,
                        advance_64: advance_64 })
@@ -191,9 +192,10 @@ pub fn rasterize_cached(c: RstGlyphCache, k: RstGlyphKey, outline: svgpath.SvgPa
     let i = index_of(c, k)
     if i >= 0
         return Ok((c, c.images[i]))
-    let g = match rasterize(outline, scale, (k.subpixel_x as Float + 0.5) / subpixel_steps() as Float,
+    let g = match rasterize(outline, scale, k.subpixel_x as Float / subpixel_steps() as Float,
                             advance_64, flatten, limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(g)  => g
     var keys = list.clone(c.keys)
     var images = list.clone(c.images)
@@ -239,12 +241,15 @@ pub fn draw_run(img: Image, c: RstGlyphCache, run: fontshape.FontShaped,
         let k = RstGlyphKey { glyph: run.glyphs[i].glyph, size_64: run_size(scale),
                               subpixel_x: column_of(pen), font_id: font_id }
         match rasterize_cached(cache, k, outlines[i], scale, 0, o.flatten, o.limits)
-            Err(e)        => return Err(e)
+            Err(e)        =>
+                return Err(e)
             Ok((next, g)) =>
                 cache = next
                 match draw_glyph(out, g, pen, baseline_y, paint, o)
-                    Err(e)    => return Err(e)
-                    Ok(drawn) => out = drawn
+                    Err(e)    =>
+                        return Err(e)
+                    Ok(drawn) =>
+                        out = drawn
     Ok((out, cache))
 
 // Whether a run and an outline list line up.
@@ -269,7 +274,8 @@ pub fn run_mask(c: RstGlyphCache, run: fontshape.FontShaped, outlines: [svgpath.
     let want = geomrect.intersection_i(run_bounds(run, outlines, scale, pen_x, baseline_y), clip)
     var out = match rastermask.mask(math.max(geomrect.width_i(want), 1), math.max(geomrect.height_i(want), 1),
                                     want.min.x, want.min.y, limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(m)  => m
     if geomrect.is_empty_i(want)
         return Ok((cache, out))
@@ -279,7 +285,8 @@ pub fn run_mask(c: RstGlyphCache, run: fontshape.FontShaped, outlines: [svgpath.
         let k = RstGlyphKey { glyph: run.glyphs[i].glyph, size_64: run_size(scale),
                               subpixel_x: column_of(pen), font_id: font_id }
         match rasterize_cached(cache, k, outlines[i], scale, 0, flatten, limits)
-            Err(e)        => return Err(e)
+            Err(e)        =>
+                return Err(e)
             Ok((next, g)) =>
                 cache = next
                 add_into(var buf, out, placed_mask(g, pen, baseline_y))

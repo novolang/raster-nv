@@ -265,7 +265,8 @@ pub fn retarget(m: RstMask, extent: geomrect.GeomRectI,
                 limits: RstLimits) -> Result<RstMask, rastererror.RstFault> []
     let want = match build(geomrect.width_i(extent), geomrect.height_i(extent),
                            extent.min.x, extent.min.y, 0, limits)
-        Err(e) => return Err(e)
+        Err(e) =>
+            return Err(e)
         Ok(r)  => r
     let box = geomrect.intersection_i(rastermask.extent(m), rastermask.extent(want))
     var out = bytes.clone(want.coverage)
@@ -288,7 +289,7 @@ pub fn threshold(m: RstMask, at_least: Int) -> RstMask []
     var out = bytes.clone(m.coverage)
     for i in 0..bytes.len(out)
         let on = (bytes.byte_at(m.coverage, i) ?? 0) >= at_least
-        bytes.set_u8(out, i, if on then 255 else 0)
+        bytes.set_u8(out, i, (if on then 255 else 0))
     with_coverage(m, out)
 
 // A thresholded mask's rows packed eight pixels to a byte, most

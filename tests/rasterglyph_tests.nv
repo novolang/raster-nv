@@ -1,0 +1,432 @@
+// rasterglyph_tests.nv - text: outlines in font units, a sweep, and a cache
+// the caller holds.
+//
+// The outlines are drawn by hand, boxes and a triangle in a 1000-unit em, so
+// that where every pixel lands can be worked out: a scale of 0.02 turns 500
+// units into ten pixels.  Real glyphs from installed fonts are compared with
+// FreeType by tests/oracle/compare.sh glyph.
+
+use std.test
+use std.bytes
+use std.list
+use geompoint
+use geomrect
+use geomxform
+use image
+use srgb
+use svgpath
+use fontshape
+use rastermask
+use rasterfill
+use rasterpaint
+use rasterdraw
+use rasterglyph
+use rastererror
+
+fn lim() -> rastermask.RstLimits
+    rastermask.default_limits()
+
+fn flat() -> RstFlatten
+    rasterfill.default_flatten()
+
+// Font units to pixels at 20 pixels to the em of 1000 units, y up in the
+// font and down in the image.
+fn scale() -> geomxform.GeomXform
+    geomxform.scaling(0.02, -0.02)
+
+// A box of 500 by 700 font units: ten pixels across, fourteen up.
+fn box_outline() -> svgpath.SvgPath
+    svgpath.of_rect(geomrect.of_xywh(0.0, 0.0, 500.0, 700.0), 0.0, 0.0)
+
+// A box that starts left of the origin and dips below the baseline.
+fn hanging() -> svgpath.SvgPath
+    svgpath.of_rect(geomrect.of_xywh(-300.0, -150.0, 400.0, 400.0), 0.0, 0.0)
+
+fn black() -> srgb.Srgba8
+    srgb.opaque(srgb.black())
+
+fn at(img: Image, x: Int, y: Int) -> srgb.Srgba8
+    image.pixel(img, x, y) ?? srgb.transparent()
+
+fn canvas(w: Int, h: Int) -> Image
+    image.filled(w, h, PixRgba8, srgb.opaque(srgb.white()))
+
+fn glyph_of(r: Result<RstGlyphImage, rastererror.RstFault>) -> RstGlyphImage
+    match r
+        Ok(g)  => g
+        Err(_) => RstGlyphImage { mask: RstMask { width: 1, height: 1, origin_x: 0, origin_y: 0, coverage: bytes.zeros(1) },
+                                  bearing_x: -999, bearing_y: -999, advance_64: -999 }
+
+fn rasterise(outline: svgpath.SvgPath, pen_x: Float) -> RstGlyphImage
+    glyph_of(rasterglyph.rasterize(outline, scale(), pen_x, 640, flat(), lim()))
+
+fn run_of(xs: [Int]) -> fontshape.FontShaped
+    var placed: [fontshape.FontPlaced] = []
+    for i in 0..list.len(xs)
+        list.push(placed, fontshape.FontPlaced { glyph: 10 + i, x: xs[i], cluster: i })
+    fontshape.FontShaped { glyphs: placed, width: 0, char_count: list.len(xs) }
+
+fn same_glyph_run(xs: [Int], glyph: Int) -> fontshape.FontShaped
+    var placed: [fontshape.FontPlaced] = []
+    for i in 0..list.len(xs)
+        list.push(placed, fontshape.FontPlaced { glyph: glyph, x: xs[i], cluster: i })
+    fontshape.FontShaped { glyphs: placed, width: 0, char_count: list.len(xs) }
+
+fn pair() -> [svgpath.SvgPath]
+    [box_outline(), box_outline()]
+
+fn pen_cache(c: RstGlyphCache,
+             r: Result<(RstGlyphCache, RstGlyphImage), rastererror.RstFault>) -> RstGlyphCache
+    match r
+        Ok((next, _)) => next
+        Err(_)        => c
+
+fn pen_glyph(r: Result<(RstGlyphCache, RstGlyphImage), rastererror.RstFault>) -> RstGlyphImage
+    match r
+        Ok((_, g)) => g
+        Err(_)     => glyph_of(Err(RstBadDash))
+
+@test
+fn test_the_subpixel_columns_and_the_key() [io]
+    test.assert_eq(rasterglyph.subpixel_steps(), 3)
+    let k = rasterglyph.key_for(42, 7, 16.0, 10.0)
+    test.assert_eq(k.glyph, 42)
+    test.assert_eq(k.font_id, 7)
+    test.assert_eq(k.size_64, 1024)
+    test.assert_eq(k.subpixel_x, 0)
+    test.case("the fraction of the pen picks the column")
+    test.assert_eq(rasterglyph.key_for(1, 0, 16.0, 10.32).subpixel_x, 0)
+    test.assert_eq(rasterglyph.key_for(1, 0, 16.0, 10.34).subpixel_x, 1)
+    test.assert_eq(rasterglyph.key_for(1, 0, 16.0, 10.66).subpixel_x, 1)
+    test.assert_eq(rasterglyph.key_for(1, 0, 16.0, 10.67).subpixel_x, 2)
+    test.assert_eq(rasterglyph.key_for(1, 0, 16.0, 10.999).subpixel_x, 2)
+    test.assert_eq(rasterglyph.key_for(1, 0, 16.0, -0.25).subpixel_x, 2)
+    test.case("a size is a whole number of 64ths, so two routes to 12.5 agree")
+    test.assert_eq(rasterglyph.key_for(1, 0, 12.5, 0.0).size_64, 800)
+    test.assert_eq(rasterglyph.key_for(1, 0, 5.0 / 2.0 * 5.0, 0.0).size_64, 800)
+    test.assert_eq(rasterglyph.key_for(1, 0, 12.4999, 0.0).size_64, 800)
+
+@test
+fn test_a_glyph_rasterises_from_font_units_to_pixels() [io]
+    let g = rasterise(box_outline(), 0.0)
+    test.case("ten pixels across and fourteen up, sitting on the baseline")
+    test.assert_eq(g.mask.width, 10)
+    test.assert_eq(g.mask.height, 14)
+    test.assert_eq(g.bearing_x, 0)
+    test.assert_eq(g.bearing_y, 14)
+    test.assert_eq(g.advance_64, 640)
+    test.assert(rastermask.is_opaque(g.mask))
+    test.case("the mask's own origin is the same bearing, with y down")
+    test.assert_eq(g.mask.origin_x, 0)
+    test.assert_eq(g.mask.origin_y, -14)
+    test.case("a box that reaches left of the pen and under the baseline has a negative bearing")
+    let h = rasterise(hanging(), 0.0)
+    test.assert_eq(h.bearing_x, -6)
+    test.assert_eq(h.bearing_y, 5)
+    test.assert_eq(h.mask.width, 8)
+    test.assert_eq(h.mask.height, 8)
+    test.case("the fraction of the pen moves the coverage across the pixels")
+    let half = rasterise(box_outline(), 0.5)
+    test.assert_eq(half.mask.width, 11)
+    test.assert_eq(rastermask.at(half.mask, 0, -1), 128)
+    test.assert_eq(rastermask.at(half.mask, 5, -1), 255)
+    test.assert_eq(rastermask.at(half.mask, 10, -1), 128)
+    test.case("only the fraction counts, not the whole pixels of the pen")
+    let far = rasterise(box_outline(), 7.5)
+    test.assert_eq(far.bearing_x, 0)
+    test.assert_eq(far.mask.width, 11)
+
+@test
+fn test_a_glyph_with_nothing_to_draw_has_an_empty_mask_and_keeps_its_advance() [io]
+    let space = rasterise(svgpath.empty(), 0.0)
+    test.assert(rastermask.is_empty(space.mask))
+    test.assert_eq(space.bearing_x, 0)
+    test.assert_eq(space.bearing_y, 0)
+    test.assert_eq(space.advance_64, 640)
+
+@test
+fn test_a_glyph_past_the_budget_is_refused() [io]
+    let tiny = RstLimits { max_pixels: 10, max_edges: 100 }
+    match rasterglyph.rasterize(box_outline(), scale(), 0.0, 0, flat(), tiny)
+        Ok(_)  => test.fail("a glyph past the budget was rasterised")
+        Err(e) => test.assert_eq_str(rastererror.describe(e), "a mask of 140 pixels is past the limit of 10")
+
+@test
+fn test_the_cache_is_a_value_the_caller_holds() [io]
+    let c0 = rasterglyph.cache(4)
+    test.assert_eq(c0.capacity, 4)
+    test.assert_eq(rasterglyph.cached_count(c0), 0)
+    test.assert_eq(rasterglyph.cache_bytes(c0), 0)
+    let k = rasterglyph.key_for(1, 0, 20.0, 0.0)
+    test.assert(rasterglyph.is_cached(c0, k) == false)
+    test.assert(rasterglyph.cached(c0, k) == None)
+    test.case("a miss rasterises and answers the cache with it in, leaving the one given as it was")
+    let r = rasterglyph.rasterize_cached(c0, k, box_outline(), scale(), 640, flat(), lim())
+    let c1 = pen_cache(c0, r)
+    test.assert_eq(rasterglyph.cached_count(c1), 1)
+    test.assert_eq(rasterglyph.cached_count(c0), 0)
+    test.assert(rasterglyph.is_cached(c1, k))
+    test.assert_eq(rasterglyph.cache_bytes(c1), 140)
+    test.case("a hit answers the same glyph and the same cache")
+    let r2 = rasterglyph.rasterize_cached(c1, k, svgpath.empty(), scale(), 0, flat(), lim())
+    test.assert_eq(rasterglyph.cached_count(pen_cache(c1, r2)), 1)
+    test.assert_eq(pen_glyph(r2).mask.width, pen_glyph(r).mask.width)
+    test.assert_eq(pen_glyph(r2).advance_64, 640)
+    match rasterglyph.cached(c1, k)
+        Some(g) => test.assert_eq(g.bearing_y, 14)
+        None    => test.fail("the glyph was not cached")
+    test.case("clearing drops everything and keeps the capacity")
+    let cleared = rasterglyph.cleared(c1)
+    test.assert_eq(rasterglyph.cached_count(cleared), 0)
+    test.assert_eq(cleared.capacity, 4)
+    test.assert(rasterglyph.is_cached(cleared, k) == false)
+
+@test
+fn test_the_cache_is_keyed_on_glyph_size_column_and_font() [io]
+    var c = rasterglyph.cache(10)
+    let a = rasterglyph.key_for(1, 0, 20.0, 0.0)
+    c = pen_cache(c, rasterglyph.rasterize_cached(c, a, box_outline(), scale(), 0, flat(), lim()))
+    test.assert(rasterglyph.is_cached(c, rasterglyph.key_for(1, 0, 20.0, 0.1)))
+    test.assert(rasterglyph.is_cached(c, rasterglyph.key_for(2, 0, 20.0, 0.0)) == false)
+    test.assert(rasterglyph.is_cached(c, rasterglyph.key_for(1, 1, 20.0, 0.0)) == false)
+    test.assert(rasterglyph.is_cached(c, rasterglyph.key_for(1, 0, 21.0, 0.0)) == false)
+    test.assert(rasterglyph.is_cached(c, rasterglyph.key_for(1, 0, 20.0, 0.5)) == false)
+    test.case("each of them is its own entry")
+    for k in [rasterglyph.key_for(2, 0, 20.0, 0.0), rasterglyph.key_for(1, 1, 20.0, 0.0), rasterglyph.key_for(1, 0, 21.0, 0.0),
+              rasterglyph.key_for(1, 0, 20.0, 0.5)]
+        c = pen_cache(c, rasterglyph.rasterize_cached(c, k, box_outline(), scale(), 0, flat(), lim()))
+    test.assert_eq(rasterglyph.cached_count(c), 5)
+    test.case("a cached glyph is drawn at the left edge of its column, so a whole pixel is exact")
+    let g = pen_glyph(rasterglyph.rasterize_cached(c, rasterglyph.key_for(1, 0, 20.0, 0.0), box_outline(), scale(), 0, flat(), lim()))
+    test.assert_eq(g.mask.width, 10)
+    test.assert_eq(rastermask.at(g.mask, 0, -1), 255)
+    let g2 = pen_glyph(rasterglyph.rasterize_cached(c, rasterglyph.key_for(1, 0, 20.0, 0.5), box_outline(), scale(), 0, flat(), lim()))
+    test.assert_eq(g2.mask.width, 11)
+    test.assert_eq(rastermask.at(g2.mask, 0, -1), 170)
+    test.assert_eq(rastermask.at(g2.mask, 10, -1), 85)
+
+@test
+fn test_the_cache_drops_the_oldest_entry_when_it_is_full() [io]
+    var c = rasterglyph.cache(2)
+    let keys = [rasterglyph.key_for(1, 0, 20.0, 0.0),
+        rasterglyph.key_for(2, 0, 20.0, 0.0),
+        rasterglyph.key_for(3, 0, 20.0, 0.0)]
+    for k in keys
+        c = pen_cache(c, rasterglyph.rasterize_cached(c, k, box_outline(), scale(), 0, flat(), lim()))
+    test.assert_eq(rasterglyph.cached_count(c), 2)
+    test.assert(rasterglyph.is_cached(c, keys[0]) == false)
+    test.assert(rasterglyph.is_cached(c, keys[1]))
+    test.assert(rasterglyph.is_cached(c, keys[2]))
+    test.case("a cache of no capacity holds nothing but still answers the glyph")
+    let none = rasterglyph.cache(0)
+    let r = rasterglyph.rasterize_cached(none, keys[0], box_outline(), scale(), 640, flat(), lim())
+    test.assert_eq(rasterglyph.cached_count(pen_cache(none, r)), 0)
+    test.assert_eq(pen_glyph(r).mask.width, 10)
+    test.case("the refusal of a glyph past the budget leaves the cache as it was")
+    match rasterglyph.rasterize_cached(c, rasterglyph.key_for(9, 0, 20.0, 0.0), box_outline(), scale(), 0, flat(),
+                                       RstLimits { max_pixels: 4, max_edges: 100 })
+        Ok(_)  => test.fail("a glyph past the budget was cached")
+        Err(e) => test.assert(rastererror.is_budget(e))
+
+@test
+fn test_a_cached_glyph_is_drawn_at_its_pen() [io]
+    let g = rasterise(box_outline(), 0.0)
+    test.case("the pen's whole pixel plus the bearing, and the rounded baseline less the bearing up")
+    let out = match rasterglyph.draw_glyph(canvas(30, 30), g, 5.0, 20.0, rasterpaint.solid(srgb.black()), rasterdraw.opts(30, 30))
+        Ok(img) => img
+        Err(_)  => canvas(1, 1)
+    test.assert(srgb.same_pixel(at(out, 5, 6), black()))
+    test.assert(srgb.same_pixel(at(out, 14, 19), black()))
+    test.assert(srgb.same_pixel(at(out, 4, 10), srgb.opaque(srgb.white())))
+    test.assert(srgb.same_pixel(at(out, 15, 10), srgb.opaque(srgb.white())))
+    test.assert(srgb.same_pixel(at(out, 8, 5), srgb.opaque(srgb.white())))
+    test.assert(srgb.same_pixel(at(out, 8, 20), srgb.opaque(srgb.white())))
+    test.case("a baseline half way rounds up")
+    let low = match rasterglyph.draw_glyph(canvas(30, 30), g, 5.0, 19.5, rasterpaint.solid(srgb.black()), rasterdraw.opts(30, 30))
+        Ok(img) => img
+        Err(_)  => canvas(1, 1)
+    test.assert(srgb.same_pixel(at(low, 5, 6), black()))
+    test.case("a gradient across the word is a paint like any other")
+    let ramp = rasterpaint.linear(5.0, 0.0, 15.0, 0.0, srgb.rgb8(255, 0, 0), srgb.rgb8(0, 0, 255))
+    let painted = match rasterglyph.draw_glyph(canvas(30, 30), g, 5.0, 20.0, ramp, rasterdraw.opts(30, 30))
+        Ok(img) => img
+        Err(_)  => canvas(1, 1)
+    test.assert(at(painted, 5, 10).rgb.r > at(painted, 14, 10).rgb.r + 150)
+    test.case("a pixel kind that cannot be drawn into is refused")
+    match rasterglyph.draw_glyph(image.new(30, 30, PixRgba16),
+        g,
+        5.0,
+        20.0,
+        rasterpaint.solid(srgb.black()),
+        rasterdraw.opts(30, 30))
+        Ok(_)  => test.fail("a 16-bit image was drawn into")
+        Err(e) => test.assert_eq_str(rastererror.describe(e), "the pixel kind PixRgba16 cannot be drawn into")
+
+@test
+fn test_a_run_is_drawn_glyph_by_glyph_through_the_cache() [io]
+    let run = run_of([0, 600])
+    let c = rasterglyph.cache(8)
+    match rasterglyph.draw_run(canvas(40, 30),
+        c,
+        run,
+        pair(),
+        scale(),
+        0,
+        2.0,
+        20.0,
+        rasterpaint.solid(srgb.black()),
+        rasterdraw.opts(40, 30))
+        Err(_)           => test.fail("a run was refused")
+        Ok((out, cache)) =>
+            test.case("the second glyph sits 600 units, twelve pixels, after the first")
+            test.assert(srgb.same_pixel(at(out, 2, 10), black()))
+            test.assert(srgb.same_pixel(at(out, 11, 10), black()))
+            test.assert(srgb.same_pixel(at(out, 12, 10), srgb.opaque(srgb.white())))
+            test.assert(srgb.same_pixel(at(out, 14, 10), black()))
+            test.assert(srgb.same_pixel(at(out, 23, 10), black()))
+            test.assert(srgb.same_pixel(at(out, 24, 10), srgb.opaque(srgb.white())))
+            test.assert_eq(rasterglyph.cached_count(cache), 2)
+    test.case("the same glyph twice at the same fraction is one entry")
+    match rasterglyph.draw_run(canvas(40, 30), c, same_glyph_run([0, 600, 1200], 5), [box_outline(), box_outline(), box_outline()],
+                               scale(), 0, 2.0, 20.0, rasterpaint.solid(srgb.black()), rasterdraw.opts(40, 30))
+        Err(_)         => test.fail("a run was refused")
+        Ok((_, cache)) => test.assert_eq(rasterglyph.cached_count(cache), 1)
+    test.case("a fractional pen puts the same glyph in another column")
+    match rasterglyph.draw_run(canvas(40, 30), c, same_glyph_run([0, 625], 5), pair(), scale(), 0, 2.0, 20.0,
+                               rasterpaint.solid(srgb.black()), rasterdraw.opts(40, 30))
+        Err(_)         => test.fail("a run was refused")
+        Ok((_, cache)) => test.assert_eq(rasterglyph.cached_count(cache), 2)
+    test.case("the font number keeps two fonts' glyphs apart")
+    match rasterglyph.draw_run(canvas(40, 30), c, same_glyph_run([0], 5), [box_outline()], scale(), 0, 2.0, 20.0,
+                               rasterpaint.solid(srgb.black()), rasterdraw.opts(40, 30))
+        Err(_)         => test.fail("a run was refused")
+        Ok((_, first)) =>
+            match rasterglyph.draw_run(canvas(40, 30), first, same_glyph_run([0], 5), [box_outline()], scale(), 1, 2.0, 20.0,
+                                       rasterpaint.solid(srgb.black()), rasterdraw.opts(40, 30))
+                Err(_)          => test.fail("a run was refused")
+                Ok((_, second)) => test.assert_eq(rasterglyph.cached_count(second), 2)
+
+@test
+fn test_a_run_and_its_outlines_have_to_line_up() [io]
+    test.assert(rasterglyph.run_is_consistent(run_of([0, 600]), pair()))
+    test.assert(rasterglyph.run_is_consistent(run_of([0, 600, 1200]), pair()) == false)
+    test.assert(rasterglyph.run_is_consistent(run_of([0]), pair()) == false)
+    test.assert(rasterglyph.run_is_consistent(run_of([]), []))
+    test.case("a run longer than its outlines draws the glyphs that have one")
+    match rasterglyph.draw_run(canvas(40, 30), rasterglyph.cache(4), run_of([0, 600, 1200]), pair(), scale(), 0, 2.0, 20.0,
+                               rasterpaint.solid(srgb.black()), rasterdraw.opts(40, 30))
+        Err(_)           => test.fail("a run was refused")
+        Ok((out, cache)) =>
+            test.assert_eq(rasterglyph.cached_count(cache), 2)
+            test.assert(srgb.same_pixel(at(out, 30, 10), srgb.opaque(srgb.white())))
+    test.case("an empty run draws nothing")
+    match rasterglyph.draw_run(canvas(4, 4), rasterglyph.cache(4), run_of([]), [], scale(), 0, 0.0, 3.0, rasterpaint.solid(srgb.black()),
+                               rasterdraw.opts(4, 4))
+        Err(_)           => test.fail("an empty run was refused")
+        Ok((out, cache)) =>
+            test.assert_eq(rasterglyph.cached_count(cache), 0)
+            test.assert(srgb.same_pixel(at(out, 1, 1), srgb.opaque(srgb.white())))
+    test.case("a refusal on the way is the run's refusal")
+    let tight = rasterdraw.RstDrawOpts { clip_rect: geomrect.of_xywh_i(0, 0, 40, 30), clip_mask: None, blend: RstOver,
+                                         paint_xform: geomxform.identity(), flatten: flat(),
+                                         limits: RstLimits { max_pixels: 4, max_edges: 100 } }
+    match rasterglyph.draw_run(canvas(40, 30), rasterglyph.cache(4), run_of([0]), [box_outline()], scale(), 0, 2.0, 20.0,
+                               rasterpaint.solid(srgb.black()), tight)
+        Ok(_)  => test.fail("a run past the budget was drawn")
+        Err(e) => test.assert(rastererror.is_budget(e))
+    match rasterglyph.draw_run(image.new(40, 30, PixLuma16), rasterglyph.cache(4), run_of([0]), [box_outline()], scale(), 0, 2.0, 20.0,
+                               rasterpaint.solid(srgb.black()), rasterdraw.opts(40, 30))
+        Ok(_)  => test.fail("a 16-bit image was drawn into")
+        Err(e) => test.assert_eq_str(rastererror.describe(e), "the pixel kind PixLuma16 cannot be drawn into")
+
+@test
+fn test_where_a_runs_ink_lands() [io]
+    let run = run_of([0, 600])
+    let b = rasterglyph.run_bounds(run, pair(), scale(), 2.0, 20.0)
+    test.assert_eq(b.min.x, 2)
+    test.assert_eq(b.max.x, 24)
+    test.assert_eq(b.min.y, 6)
+    test.assert_eq(b.max.y, 20)
+    test.case("a glyph with no outline adds nothing and an empty run has no bounds")
+    let with_space = rasterglyph.run_bounds(run_of([0, 300, 600]), [box_outline(), svgpath.empty(), box_outline()], scale(), 2.0, 20.0)
+    test.assert_eq(with_space.max.x, 24)
+    test.assert(geomrect.is_empty_i(rasterglyph.run_bounds(run_of([]), [], scale(), 0.0, 0.0)))
+    test.assert(geomrect.is_empty_i(rasterglyph.run_bounds(run_of([0]), [svgpath.empty()], scale(), 0.0, 0.0)))
+    test.case("a fractional pen widens the box to the pixels it touches")
+    test.assert_eq(rasterglyph.run_bounds(run_of([0]), [box_outline()], scale(), 2.5, 20.0).max.x, 13)
+
+@test
+fn test_a_run_as_one_mask() [io]
+    let run = run_of([0, 600])
+    let clip = geomrect.of_xywh_i(0, 0, 40, 30)
+    match rasterglyph.run_mask(rasterglyph.cache(4), run, pair(), scale(), 0, 2.0, 20.0, clip, flat(), lim())
+        Err(_)            => test.fail("a run was refused")
+        Ok((cache, mask)) =>
+            test.assert_eq(rasterglyph.cached_count(cache), 2)
+            test.assert_eq(mask.origin_x, 2)
+            test.assert_eq(mask.origin_y, 6)
+            test.assert_eq(mask.width, 22)
+            test.assert_eq(mask.height, 14)
+            test.assert_eq(rastermask.at(mask, 5, 10), 255)
+            test.assert_eq(rastermask.at(mask, 12, 10), 0)
+            test.assert_eq(rastermask.at(mask, 20, 10), 255)
+    test.case("the clip holds the box")
+    match rasterglyph.run_mask(rasterglyph.cache(4),
+        run,
+        pair(),
+        scale(),
+        0,
+        2.0,
+        20.0,
+        geomrect.of_xywh_i(8, 8, 10, 5),
+        flat(),
+        lim())
+        Err(_)        => test.fail("a run was refused")
+        Ok((_, mask)) =>
+            test.assert_eq(mask.origin_x, 8)
+            test.assert_eq(mask.width, 10)
+            test.assert_eq(mask.height, 5)
+    test.case("two glyphs that overlap cover a pixel together")
+    let overlap = run_of([0, 300])
+    match rasterglyph.run_mask(rasterglyph.cache(4), overlap, pair(), scale(), 0, 2.0, 20.0, clip, flat(), lim())
+        Err(_)        => test.fail("a run was refused")
+        Ok((_, mask)) =>
+            test.assert_eq(rastermask.at(mask, 9, 10), 255)
+            test.assert_eq(rastermask.at(mask, 4, 10), 255)
+    test.case("a run off the clip is an empty mask")
+    match rasterglyph.run_mask(rasterglyph.cache(4),
+        run,
+        pair(),
+        scale(),
+        0,
+        2.0,
+        20.0,
+        geomrect.of_xywh_i(100, 100, 10, 10),
+        flat(),
+        lim())
+        Err(_)            => test.fail("a run was refused")
+        Ok((cache, mask)) =>
+            test.assert(rastermask.is_empty(mask))
+            test.assert_eq(rasterglyph.cached_count(cache), 0)
+    test.case("the budget applies to the box")
+    match rasterglyph.run_mask(rasterglyph.cache(4),
+        run,
+        pair(),
+        scale(),
+        0,
+        2.0,
+        20.0,
+        clip,
+        flat(),
+        RstLimits { max_pixels: 10, max_edges: 100 })
+        Ok(_)  => test.fail("a mask past the budget was built")
+        Err(e) => test.assert_eq_str(rastererror.describe(e), "a mask of 308 pixels is past the limit of 10")
+    test.case("a glyph's own refusal is the run's")
+    match rasterglyph.run_mask(rasterglyph.cache(4), run, pair(), scale(), 0, 2.0, 20.0, clip, RstFlatten { tolerance: 0.25, max_per_curve: 256 },
+                               RstLimits { max_pixels: 336, max_edges: 1 })
+        Ok(_)  => test.fail("an edge budget was ignored")
+        Err(e) => test.assert(rastererror.is_budget(e))
+    test.case("an empty run is an empty mask")
+    match rasterglyph.run_mask(rasterglyph.cache(4), run_of([]), [], scale(), 0, 0.0, 0.0, clip, flat(), lim())
+        Err(_)        => test.fail("an empty run was refused")
+        Ok((_, mask)) => test.assert(rastermask.is_empty(mask))
