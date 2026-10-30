@@ -10,7 +10,6 @@ use std.fs
 use std.list
 use std.str
 use std.bytes
-use geompoint
 use geomrect
 use geomxform
 use svgpath
@@ -35,29 +34,33 @@ fn num(s: Str) -> Float
 fn whole(s: Str) -> Int
     str.to_int(s) ?? 0
 
+// One command with its numbers added to a path.
+fn apply(p: svgpath.SvgPath, cmd: Str, n: [Float]) -> svgpath.SvgPath
+    if cmd == "M"
+        return svgpath.move_to(p, n[0], n[1])
+    if cmd == "L"
+        return svgpath.line_to(p, n[0], n[1])
+    if cmd == "Q"
+        return svgpath.quad_to(p, n[0], n[1], n[2], n[3])
+    if cmd == "C"
+        return svgpath.cubic_to(p, n[0], n[1], n[2], n[3], n[4], n[5])
+    if cmd == "Z"
+        return svgpath.close(p)
+    p
+
 // A path from tokens: M x y, L x y, Q x1 y1 x y, C x1 y1 x2 y2 x y, Z.
 fn path_of(t: [Str], from: Int) -> svgpath.SvgPath
     var p = svgpath.empty()
-    var i = from
-    while i < list.len(t)
-        let k = t[i]
-        if k == "M"
-            p = svgpath.move_to(p, num(t[i + 1]), num(t[i + 2]))
-            i = i + 3
-        elif k == "L"
-            p = svgpath.line_to(p, num(t[i + 1]), num(t[i + 2]))
-            i = i + 3
-        elif k == "Q"
-            p = svgpath.quad_to(p, num(t[i + 1]), num(t[i + 2]), num(t[i + 3]), num(t[i + 4]))
-            i = i + 5
-        elif k == "C"
-            p = svgpath.cubic_to(p, num(t[i + 1]), num(t[i + 2]), num(t[i + 3]), num(t[i + 4]),
-                                 num(t[i + 5]), num(t[i + 6]))
-            i = i + 7
-        else
-            p = svgpath.close(p)
-            i = i + 1
-    p
+    var cmd = ""
+    var nums: [Float] = []
+    for tok in t[from:]
+        match str.to_float(tok)
+            Some(v) => list.push(nums, v)
+            None    =>
+                p = apply(p, cmd, nums)
+                cmd = tok
+                nums = []
+    apply(p, cmd, nums)
 
 fn print_mask(m: RstMask, w: Int, h: Int)
     for y in 0..h

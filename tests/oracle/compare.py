@@ -2,11 +2,11 @@
 # compare.py - run the scenarios through raster-nv's probe and through the
 # oracle, and report how far apart the coverage planes are.
 #
-# usage: compare.py PROBE_BINARY [MODE]
+# usage: compare.py PROBE_BINARY [MODE...]
 #
-# MODE is `fill` (FreeType) for now; each mode prints one line per scenario
-# with the largest and the mean difference in coverage levels, and the exit
-# status is nonzero when a scenario is past its bound.
+# A mode is fill, stroke, paint, blend, oklab, glyph or draw; with none, all of
+# them run.  Each prints one line per scenario with the largest difference in
+# levels, and the exit status is nonzero when a scenario is past its bound.
 import math, os, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cairo

@@ -9,7 +9,6 @@
 use std.test
 use std.bytes
 use std.list
-use geompoint
 use geomrect
 use geomxform
 use image
